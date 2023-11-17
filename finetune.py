@@ -4,19 +4,14 @@ import sys
 from collections import defaultdict, deque
 import pickle
 
-import numpy as np
-from PIL import Image
-import cv2
-
-from sahi.utils.coco import Coco
-from sahi.utils.cv import get_bool_mask_from_coco_segmentation
 
 import torch
 torch.multiprocessing.set_sharing_strategy('file_system')
 import torch.nn.functional as F
-from torch.utils.data import Dataset
 import torch.distributed as dist
-from torchvision import transforms
+
+
+from Custom_dataloader import Custom_Dataset
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
@@ -26,11 +21,15 @@ import segmentation_models_pytorch as smp
 from transformers.models.maskformer.modeling_maskformer import dice_loss, sigmoid_focal_loss
 
 # Add the SAM directory to the system path
-sys.path.append("./segment-anything")
-from segment_anything import sam_model_registry
+# sys.path.append("./segment-anything")
+# from segment_anything import sam_model_registry
+
+sys.path.append("./")
+from SAM import sam_model_registry
 
 NUM_WORKERS = 0  # https://github.com/pytorch/pytorch/issues/42518
-NUM_GPUS = torch.cuda.device_count()
+# NUM_GPUS = torch.cuda.device_count()
+NUM_GPUS = 1
 DEVICE = 'cuda'
 
 
@@ -85,59 +84,6 @@ def all_gather(data):
         data_list.append(pickle.loads(buffer))
 
     return data_list
-
-
-# coco mask style dataloader
-class Coco2MaskDataset(Dataset):
-    def __init__(self, data_root, split, image_size):
-        self.data_root = data_root
-        self.split = split
-        self.image_size = image_size
-        annotation = os.path.join(data_root, split, "_annotations.coco.json")
-        self.coco = Coco.from_coco_dict_or_path(annotation)
-
-        # TODO: use ResizeLongestSide and pad to square
-        self.to_tensor = transforms.ToTensor()
-        self.normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        self.image_resize = transforms.Resize((image_size, image_size), interpolation=Image.BILINEAR)
-
-    def __len__(self):
-        return len(self.coco.images)
-
-    def __getitem__(self, index):
-        coco_image = self.coco.images[index]
-        image = Image.open(os.path.join(self.data_root, self.split, coco_image.file_name)).convert("RGB")
-        original_width, original_height = image.width, image.height
-        ratio_h = self.image_size / image.height
-        ratio_w = self.image_size / image.width
-        image = self.image_resize(image)
-        image = self.to_tensor(image)
-        image = self.normalize(image)
-
-        bboxes = []
-        masks = []
-        labels = []
-        for annotation in coco_image.annotations:
-            x, y, w, h = annotation.bbox
-            # get scaled bbox in xyxy format
-            bbox = [x * ratio_w, y * ratio_h, (x + w) * ratio_w, (y + h) * ratio_h]
-            mask = get_bool_mask_from_coco_segmentation(annotation.segmentation, original_width, original_height)
-            mask = cv2.resize(mask, (self.image_size, self.image_size), interpolation=cv2.INTER_LINEAR)
-            mask = (mask > 0.5).astype(np.uint8)
-            label = annotation.category_id
-            bboxes.append(bbox)
-            masks.append(mask)
-            labels.append(label)
-        bboxes = np.stack(bboxes, axis=0)
-        masks = np.stack(masks, axis=0)
-        labels = np.stack(labels, axis=0)
-        return image, torch.tensor(bboxes), torch.tensor(masks).long()
-    
-    @classmethod
-    def collate_fn(cls, batch):
-        images, bboxes, masks = zip(*batch)
-        images = torch.stack(images, dim=0)
-        return images, bboxes, masks
 
 
 class SAMFinetuner(pl.LightningModule):
@@ -270,7 +216,7 @@ class SAMFinetuner(pl.LightningModule):
         outputs.pop("predictions")
         return outputs
     
-    def validation_epoch_end(self, outputs):
+    def on_validation_epoch_end(self, outputs):
         if NUM_GPUS > 1:
             outputs = all_gather(outputs)
             # the outputs are a list of lists, so flatten it
@@ -302,6 +248,7 @@ class SAMFinetuner(pl.LightningModule):
             return warmup_step_lr
         scheduler = torch.optim.lr_scheduler.LambdaLR(
             opt,
+            ## warmup change
             warmup_step_lr_builder(250, [0.66667, 0.86666], 0.1)
         )
         return {
@@ -351,8 +298,8 @@ def main():
     args = parser.parse_args()
 
     # load the dataset
-    train_dataset = Coco2MaskDataset(data_root=args.data_root, split="train", image_size=args.image_size)
-    val_dataset = Coco2MaskDataset(data_root=args.data_root, split="val", image_size=args.image_size)
+    train_dataset = Custom_Dataset(data_root=args.data_root, phase="train", image_size=args.image_size)
+    val_dataset = Custom_Dataset(data_root=args.data_root, phase="val", image_size=args.image_size)
 
     # create the model
     model = SAMFinetuner(
@@ -383,7 +330,8 @@ def main():
         ),
     ]
     trainer = pl.Trainer(
-        strategy='ddp' if NUM_GPUS > 1 else None,
+        strategy='ddp_find_unused_parameters_true' if NUM_GPUS > 1 else 'auto',
+        # strategy='ddp' if NUM_GPUS > 1 else None,
         accelerator=DEVICE,
         devices=NUM_GPUS,
         precision=32,

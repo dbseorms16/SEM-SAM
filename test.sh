@@ -1,0 +1,14 @@
+python finetune.py \
+    --data_root ./dataset_name \
+    --model_type vit_h \
+    --checkpoint_path ../SAM_customizing/sam_vit_h.pth \
+    --freeze_image_encoder \
+    --freeze_mask_decoder \
+    --freeze_prompt_encoder \
+    --batch_size 3 \
+    --image_size 1024 \
+    --steps 1500000 \
+    --learning_rate 1.e-5 \
+    --weight_decay 0.01 \
+    --metrics_interval 74 \
+    --test_only
