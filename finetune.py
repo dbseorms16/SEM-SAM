@@ -95,6 +95,7 @@ class SAMFinetuner(pl.LightningModule):
             freeze_image_encoder=False,
             freeze_prompt_encoder=False,
             freeze_mask_decoder=False,
+            train_VPT_decoder = False,
             batch_size=1,
             learning_rate=1e-4,
             weight_decay=1e-4,
@@ -117,7 +118,15 @@ class SAMFinetuner(pl.LightningModule):
         if freeze_mask_decoder:
             for param in self.model.mask_decoder.parameters():
                 param.requires_grad = False
-        
+        if train_VPT_decoder:
+            for k, v in self.model.mask_decoder.named_parameters():
+
+                if 'embedding_maskfeature' or 'embedding_encoder' or 'compress_vit_feat'  in k:
+                    v.requires_grad = True
+                if 'hf_token' or b'hf_mlp' in k:
+                    v.requires_grad = True
+                    
+            
         self.batch_size = batch_size
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
@@ -131,13 +140,15 @@ class SAMFinetuner(pl.LightningModule):
 
     def forward(self, imgs, bboxes, labels):
         _, _, H, W = imgs.shape
-        features = self.model.image_encoder(imgs)
+        features, interm_embeddings = self.model.image_encoder(imgs)
+        interm_embeddings = interm_embeddings[0] # early layer
+        
         num_masks = sum([len(b) for b in bboxes])
 
         loss_focal = loss_dice = loss_iou = 0.
         predictions = []
         tp, fp, fn, tn = [], [], [], []
-        for feature, bbox, label in zip(features, bboxes, labels):
+        for feature, bbox, label, curr_interm in zip(features, bboxes, labels, interm_embeddings):
             # Embed prompts
             sparse_embeddings, dense_embeddings = self.model.prompt_encoder(
                 points=None,
@@ -151,6 +162,7 @@ class SAMFinetuner(pl.LightningModule):
                 sparse_prompt_embeddings=sparse_embeddings,
                 dense_prompt_embeddings=dense_embeddings,
                 multimask_output=False,
+                interm_embeddings = curr_interm.unsqueeze(0).unsqueeze(0)
             )
             # Upscale the masks to the original image resolution
             masks = F.interpolate(
@@ -287,6 +299,7 @@ def main():
     parser.add_argument("--freeze_image_encoder", action="store_true", help="freeze image encoder")
     parser.add_argument("--freeze_prompt_encoder", action="store_true", help="freeze prompt encoder")
     parser.add_argument("--freeze_mask_decoder", action="store_true", help="freeze mask decoder")
+    parser.add_argument("--train_VPT_decoder", action="store_true", help="train added parameters in decoder")
     parser.add_argument("--batch_size", type=int, default=1, help="batch size")
     parser.add_argument("--image_size", type=int, default=1024, help="image size")
     parser.add_argument("--steps", type=int, default=1500, help="number of steps")
@@ -308,6 +321,7 @@ def main():
         freeze_image_encoder=args.freeze_image_encoder,
         freeze_prompt_encoder=args.freeze_prompt_encoder,
         freeze_mask_decoder=args.freeze_mask_decoder,
+        train_VPT_decoder=args.train_VPT_decoder,
         train_dataset=train_dataset,
         val_dataset=val_dataset,
         batch_size=args.batch_size,

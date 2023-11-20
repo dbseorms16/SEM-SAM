@@ -5,6 +5,7 @@ python finetune.py \
     --freeze_image_encoder \
     --freeze_mask_decoder \
     --freeze_prompt_encoder \
+    --train_VPT_decoder \
     --batch_size 4 \
     --image_size 1024 \
     --steps 1500000 \
