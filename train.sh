@@ -9,6 +9,6 @@ python finetune.py \
     --batch_size 4 \
     --image_size 1024 \
     --steps 1500000 \
-    --learning_rate 1.e-5 \
+    --learning_rate 1.e-3 \
     --weight_decay 0.01 \
-    --metrics_interval 93
+    --metrics_interval 37

@@ -10,9 +10,12 @@ torch.multiprocessing.set_sharing_strategy('file_system')
 import torch.nn.functional as F
 import torch.distributed as dist
 
-
+from torchvision import transforms
 from Custom_dataloader import Custom_Dataset
 
+from predict_utils import show_mask, show_box, calculate_metrics
+import numpy as np
+import matplotlib.pyplot as plt
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 
@@ -85,6 +88,14 @@ def all_gather(data):
 
     return data_list
 
+def DeNormalize(image):
+    mean=(0.485, 0.456, 0.406)
+    std=(0.229, 0.224, 0.225)
+    
+    image *= std
+    image += mean
+    image *= 255.0
+    return image
 
 class SAMFinetuner(pl.LightningModule):
 
@@ -101,10 +112,14 @@ class SAMFinetuner(pl.LightningModule):
             weight_decay=1e-4,
             train_dataset=None,
             val_dataset=None,
+            test_dataset=None,
             metrics_interval=10,
+            args=None,
         ):
         super(SAMFinetuner, self).__init__()
 
+        self.save_base = './val_results'
+        
         self.model_type = model_type
         self.model = sam_model_registry[self.model_type](checkpoint=checkpoint_path)
         self.model.to(device=self.device)
@@ -133,11 +148,16 @@ class SAMFinetuner(pl.LightningModule):
 
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
-
+        self.test_dataset = test_dataset
+        
         self.train_metric = defaultdict(lambda: deque(maxlen=metrics_interval))
+        self.val_metric = defaultdict(lambda: deque(maxlen=metrics_interval))
 
         self.metrics_interval = metrics_interval
 
+        self.validation_step_outputs = []
+        self.test_step_outputs = []
+        
     def forward(self, imgs, bboxes, labels):
         _, _, H, W = imgs.shape
         features, interm_embeddings = self.model.image_encoder(imgs)
@@ -203,7 +223,7 @@ class SAMFinetuner(pl.LightningModule):
         }
     
     def training_step(self, batch, batch_nb):
-        imgs, bboxes, labels = batch
+        imgs, bboxes, labels, _, _ = batch
         outputs = self(imgs, bboxes, labels)
 
         for metric in ['tp', 'fp', 'fn', 'tn']:
@@ -223,28 +243,54 @@ class SAMFinetuner(pl.LightningModule):
         return metrics
     
     def validation_step(self, batch, batch_nb):
-        imgs, bboxes, labels = batch
+        imgs, bboxes, labels, _, _ = batch
         outputs = self(imgs, bboxes, labels)
-        outputs.pop("predictions")
-        return outputs
-    
-    def on_validation_epoch_end(self, outputs):
-        if NUM_GPUS > 1:
-            outputs = all_gather(outputs)
-            # the outputs are a list of lists, so flatten it
-            outputs = [item for sublist in outputs for item in sublist]
+        
+        self.img_mask_save('validation',batch, outputs)
+        
+        for metric in ['tp', 'fp', 'fn', 'tn']:
+            self.val_metric[metric].append(outputs[metric])
         # aggregate step metics
-        step_metrics = [
-            torch.cat(list([x[metric].to(self.device) for x in outputs]))
-            for metric in ['tp', 'fp', 'fn', 'tn']]
-        # per mask IoU means that we first calculate IoU score for each mask
-        # and then compute mean over these scores
+        step_metrics = [torch.cat(list(self.val_metric[metric])) for metric in ['tp', 'fp', 'fn', 'tn']]
         per_mask_iou = smp.metrics.iou_score(*step_metrics, reduction="micro-imagewise")
-
+        self.validation_step_outputs.append(per_mask_iou)
         metrics = {"val_per_mask_iou": per_mask_iou}
-        self.log_dict(metrics)
+        self.log("val_per_mask_iou", per_mask_iou, sync_dist=True)
+        
         return metrics
     
+    def on_validation_epoch_end(self):
+
+        epoch_average = torch.stack(self.validation_step_outputs).mean()
+        self.log("validation_epoch_average iou", epoch_average, sync_dist=True)
+        self.validation_step_outputs.clear()  # free memory
+        
+    
+    def test_step(self, batch, batch_nb):
+        imgs, bboxes, labels, _, _ = batch
+        outputs = self(imgs, bboxes, labels)
+        
+        self.img_mask_save('test', batch, outputs)
+        
+        ## validation log 
+        for metric in ['tp', 'fp', 'fn', 'tn']:
+            self.val_metric[metric].append(outputs[metric])
+        # aggregate step metics
+        step_metrics = [torch.cat(list(self.val_metric[metric])) for metric in ['tp', 'fp', 'fn', 'tn']]
+        per_mask_iou = smp.metrics.iou_score(*step_metrics, reduction="micro-imagewise")
+        self.validation_step_outputs.append(per_mask_iou)
+        metrics = {"test_per_mask_iou": per_mask_iou}
+        # self.log_dict(metrics)
+        self.log("test_per_mask_iou", per_mask_iou, sync_dist=True)
+        
+        return metrics
+
+    def on_test_epoch_end(self):
+        print('test_end')
+        epoch_average = torch.stack(self.validation_step_outputs).mean()
+        self.log("test_epoch_average iou", epoch_average, sync_dist=True)
+        self.validation_step_outputs.clear()  # free memory
+        
     def configure_optimizers(self):
         opt = torch.optim.AdamW(self.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
         def warmup_step_lr_builder(warmup_steps, milestones, gamma):
@@ -289,7 +335,60 @@ class SAMFinetuner(pl.LightningModule):
             num_workers=NUM_WORKERS,
             shuffle=False)
         return val_loader
+    
+    def test_dataloader(self):
+        test_loader = torch.utils.data.DataLoader(
+            self.test_dataset,
+            collate_fn=self.test_dataset.collate_fn,
+            batch_size=self.batch_size,
+            num_workers=NUM_WORKERS,
+            shuffle=False)
+        return test_loader
 
+
+    def img_mask_save(self, phase, batch, outputs):
+        
+        imgs, bboxes, gt_masks, f_names, gt_classes= batch
+        
+        pred_masks = outputs['predictions']
+
+        for i, (img, gt_mask, pred_mask, box, f_name, gt_class) in enumerate(zip(imgs, gt_masks, pred_masks, bboxes, f_names, gt_classes)):
+            img = img.permute(1,2,0).detach().cpu().numpy()
+            img = DeNormalize(img).astype(int)
+            
+            plt.figure(figsize=(10,10))
+            plt.imshow(img)
+            gt_mask = gt_mask.detach().cpu().numpy()
+            
+            ## pred_mask save
+            pred_mask = pred_mask.squeeze(0).squeeze(0).detach().cpu().numpy().astype(int)
+            # pred_mask = pred_mask.detach().cpu().numpy().astype(int)
+            pred_mask = pred_mask > 0.0
+
+            iou, f_score, precision, recall = calculate_metrics(pred_mask, gt_mask)
+            show_mask(pred_mask, plt.gca(), gt_class)
+            show_box(box.detach().cpu().numpy(), plt.gca())
+            
+            
+            plt.title(f"Mask {i+1}, IOU: {iou:.3f}, F-score: {f_score:.3f}, precision: {precision:.3f}, recall: {recall:.3f}", fontsize=12)
+            plt.axis('off')
+            filename = f"{f_name}_pred.png"
+            plt.savefig(os.path.join(self.save_base, phase, filename), bbox_inches='tight', pad_inches=0)
+            plt.close()
+            
+            
+            plt.figure(figsize=(10,10))
+            plt.imshow(img)
+            plt.title(f"GT Mask - {gt_class}", fontsize=12)
+            plt.axis('off')
+            ## gt_mask save
+            show_mask(gt_mask, plt.gca(), gt_class)
+            show_box(box.detach().cpu().numpy(), plt.gca())
+            
+            filename = f"{f_name}_gt.png"
+            plt.savefig(os.path.join(self.save_base, phase, filename), bbox_inches='tight', pad_inches=0)
+            plt.close()
+            
 
 def main():
     parser = argparse.ArgumentParser()
@@ -306,13 +405,15 @@ def main():
     parser.add_argument("--learning_rate", type=float, default=1e-4, help="learning rate")
     parser.add_argument("--weight_decay", type=float, default=1e-2, help="weight decay")
     parser.add_argument("--metrics_interval", type=int, default=50, help="interval for logging metrics")
-    parser.add_argument("--output_dir", type=str, default=".", help="path to save the model")
+    parser.add_argument("--output_dir", type=str, default="./checkpoints", help="path to save the model")
+    parser.add_argument("--test_only", action="store_true", help="test_only")
 
     args = parser.parse_args()
 
     # load the dataset
     train_dataset = Custom_Dataset(data_root=args.data_root, phase="train", image_size=args.image_size)
     val_dataset = Custom_Dataset(data_root=args.data_root, phase="val", image_size=args.image_size)
+    test_dataset = Custom_Dataset(data_root=args.data_root, phase="test", image_size=args.image_size)
 
     # create the model
     model = SAMFinetuner(
@@ -324,17 +425,19 @@ def main():
         train_VPT_decoder=args.train_VPT_decoder,
         train_dataset=train_dataset,
         val_dataset=val_dataset,
+        test_dataset=test_dataset,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
         metrics_interval=args.metrics_interval,
+        args=args
     )
 
     callbacks = [
         LearningRateMonitor(logging_interval='step'),
         ModelCheckpoint(
             dirpath=args.output_dir,
-            filename='{step}-{val_per_mask_iou:.2f}',
+            filename='{step}-{val_per_mask_iou:.2f}', 
             save_last=True,
             save_top_k=1,
             monitor="val_per_mask_iou",
@@ -357,8 +460,12 @@ def main():
         num_sanity_val_steps=0,
     )
 
-    trainer.fit(model)
+    if args.test_only:
+        trainer.test(model, ckpt_path = args.checkpoint_path, dataloaders=model.test_dataloader())
+    else:
+        trainer.fit(model)
 
 
 if __name__ == "__main__":
     main()
+
