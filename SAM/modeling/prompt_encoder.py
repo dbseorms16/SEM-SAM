@@ -22,6 +22,21 @@ import time
 import os
 import matplotlib.pyplot as plt
 
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+
+import numpy as np
+import torch
+from torch import nn
+
+from typing import Any, Optional, Tuple, Type
+
+from .common import LayerNorm2d
+
+
 class PromptEncoder(nn.Module):
     def __init__(
         self,
@@ -68,39 +83,6 @@ class PromptEncoder(nn.Module):
         )
         self.no_mask_embed = nn.Embedding(1, embed_dim)
 
-        ### 결국엔 point의 임베딩된 feature를 받아서 이를 적절한 feature로 변경하는 것이 목표
-        
-        # # prompt 포인트 갯수
-        # num_tokens = 2 
-        # patch_size = (16, 16)
-        # prompt_dim = embed_dim
-        # dropout = 0.1
-        # # prompt 포인트 갯수
-        # self.j_prompt_embeddings = nn.Parameter(torch.zeros(
-        #         1, num_tokens, prompt_dim))
-        
-        # # 가중치 초기화
-        # val = math.sqrt(6. / float(3 * reduce(mul, patch_size, 1) + prompt_dim))  # noqa
-        # nn.init.uniform_(self.j_prompt_embeddings.data, -val, val)
-        # self.j_prompt_proj = nn.Identity()
-        # self.j_prompt_dropout = Dropout(dropout)
-        
-        # depth=2,
-        # embedding_dim=prompt_embed_dim (256),
-        mlp_dim = 2048
-        num_heads= 8
-        attention_downsample_rate= 2
-        self.modulate_prompt = TwoWayAttentionBlock(
-                    embedding_dim=embed_dim,
-                    num_heads=num_heads,
-                    mlp_dim=mlp_dim,
-                    activation=activation,
-                    attention_downsample_rate=attention_downsample_rate,
-                    skip_first_layer_pe=False,
-                    # skip_first_layer_pe=True,
-                )
-        
-        
     def get_dense_pe(self) -> torch.Tensor:
         """
         Returns the positional encoding used to encode point prompts,
@@ -116,8 +98,7 @@ class PromptEncoder(nn.Module):
         self,
         points: torch.Tensor,
         labels: torch.Tensor,
-        feature: torch.Tensor,
-        pad = None,
+        pad: bool,
     ) -> torch.Tensor:
         """Embeds point prompts."""
         points = points + 0.5  # Shift to center of pixel
@@ -127,27 +108,6 @@ class PromptEncoder(nn.Module):
             points = torch.cat([points, padding_point], dim=1)
             labels = torch.cat([labels, padding_label], dim=1)
         point_embedding = self.pe_layer.forward_with_coords(points, self.input_image_size)
-        
-        # point point_embedding = (B, N, 256)
-        # Embedded feature (B, 256, 64, 64)
-        # 256 64 64
-        image_embedding = feature.flatten(1).unsqueeze(0).permute(0, 2, 1)
-        # 1 4096 256
-        #1 4096 256
-        image_pe = self.get_dense_pe().flatten(2).permute(0, 2, 1)
-        
-        queries = point_embedding
-        keys = image_embedding
-        
-        queries, keys = self.modulate_prompt(
-                queries=queries,
-                keys=keys,
-                query_pe=point_embedding,
-                key_pe=image_pe,
-            )
-        
-        point_embedding = point_embedding + queries
-        
         point_embedding[labels == -1] = 0.0
         point_embedding[labels == -1] += self.not_a_point_embed.weight
         point_embedding[labels == 0] += self.point_embeddings[0].weight
@@ -189,14 +149,11 @@ class PromptEncoder(nn.Module):
     def _get_device(self) -> torch.device:
         return self.point_embeddings[0].weight.device
 
-    # customizing forward 
     def forward(
         self,
-        feature: Optional[torch.Tensor],
         points: Optional[Tuple[torch.Tensor, torch.Tensor]],
         boxes: Optional[torch.Tensor],
         masks: Optional[torch.Tensor],
-        tuned_prompt = None 
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Embeds different types of prompts, returning both sparse and dense
@@ -219,8 +176,7 @@ class PromptEncoder(nn.Module):
         sparse_embeddings = torch.empty((bs, 0, self.embed_dim), device=self._get_device())
         if points is not None:
             coords, labels = points
-            point_embeddings = self._embed_points(coords, labels, feature, pad=(boxes is None))
-            # point_embeddings = self._embed_points(coords, labels, pad=(boxes is None))
+            point_embeddings = self._embed_points(coords, labels, pad=(boxes is None))
             sparse_embeddings = torch.cat([sparse_embeddings, point_embeddings], dim=1)
         if boxes is not None:
             box_embeddings = self._embed_boxes(boxes)
@@ -232,11 +188,9 @@ class PromptEncoder(nn.Module):
             dense_embeddings = self.no_mask_embed.weight.reshape(1, -1, 1, 1).expand(
                 bs, -1, self.image_embedding_size[0], self.image_embedding_size[1]
             )
-        
-        # 1 , 2,  256
 
         return sparse_embeddings, dense_embeddings
-    
+
 
 class PositionEmbeddingRandom(nn.Module):
     """
@@ -255,28 +209,12 @@ class PositionEmbeddingRandom(nn.Module):
     def _pe_encoding(self, coords: torch.Tensor) -> torch.Tensor:
         """Positionally encode points that are normalized to [0,1]."""
         # assuming coords are in [0, 1]^2 square and have d_1 x ... x d_n x 2 shape
-
         coords = 2 * coords - 1
         coords = coords @ self.positional_encoding_gaussian_matrix
         coords = 2 * np.pi * coords
         # outputs d_1 x ... x d_n x C shape
-        results =  torch.cat([torch.sin(coords), torch.cos(coords)], dim=-1)
+        return torch.cat([torch.sin(coords), torch.cos(coords)], dim=-1)
 
-        return results
-    
-    def re_pe_encoding(self, coords: torch.Tensor) -> torch.Tensor:
-        """Positionally encode points that are normalized to [0,1]."""
-        # assuming coords are in [0, 1]^2 square and have d_1 x ... x d_n x 2 shape
-
-        coords = 2 * coords - 1
-        coords = coords @ self.positional_encoding_gaussian_matrix
-        coords = 2 * np.pi * coords
-        # outputs d_1 x ... x d_n x C shape
-        results =  torch.cat([torch.sin(coords), torch.cos(coords)], dim=-1)
-
-        return results
-    
-    
     def forward(self, size: Tuple[int, int]) -> torch.Tensor:
         """Generate positional encoding for a grid of the specified size."""
         h, w = size
@@ -298,6 +236,7 @@ class PositionEmbeddingRandom(nn.Module):
         coords[:, :, 0] = coords[:, :, 0] / image_size[1]
         coords[:, :, 1] = coords[:, :, 1] / image_size[0]
         return self._pe_encoding(coords.to(torch.float))  # B x N x C
+
 
 def save_plt(image, path=None):
     if type(image) is torch.Tensor:

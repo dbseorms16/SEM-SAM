@@ -46,7 +46,7 @@ class Custom_Dataset(Dataset):
         
         box_x, box_y = random.randint(0, original_width - self.prompt_w), random.randint(0, original_height - self.prompt_w)
         x, y, w = box_x, box_y, self.prompt_w 
-        bbox = [x * ratio_w, y * ratio_h, (x + w) * ratio_w, (y + w) * ratio_h]
+        bbox = [x * ratio_w, y * ratio_h, (x * ratio_w) + w, (y * ratio_h) + w]
 
         
         bboxes = []
@@ -54,6 +54,7 @@ class Custom_Dataset(Dataset):
 
         ## mask preprocessing
         mask = Image.open(self.mask[index]).convert('RGB')
+        mask = np.array(mask) 
         mask = self.mask_normalize(mask, bbox)
 
         mask = cv2.resize(mask, (self.image_size, self.image_size), interpolation=cv2.INTER_LINEAR)
@@ -76,7 +77,9 @@ class Custom_Dataset(Dataset):
     def load_dataset_folder(self):
         #TODO folder name to glob
 
-        class_names = ['300W', '350W', '400W', '450W', '500W']
+        # class_names = ['300W', '350W', '400W', '450W', '500W']
+        # class_names = ['300W', '350W', '400W', '450W', '500W', 'X500W']
+        class_names = ['X500W']
         
         x, mask = [], []
         
@@ -100,7 +103,35 @@ class Custom_Dataset(Dataset):
         return list(x), list(mask)
     
     def mask_normalize(self, mask, bbox):
-        print(mask)
-        normalized_mask = mask
         
+        ## add purple 
+        m_R, m_B = mask[:,:,0], mask[:,:,2]
+        m_P = ((m_R == 100) & (m_B == 100)) * 255
+        mask = np.insert(mask, 3, m_P, axis=2)
+        
+        
+        prompt = mask[int(bbox[1]): int(bbox[3]), int(bbox[0]): int(bbox[2]), :]
+        R, G, B, P = prompt[:,:,0], prompt[:,:,1], prompt[:,:,2], prompt[:,:,3]
+        
+        r_count = self.count_pixel_label(R)
+        g_count = self.count_pixel_label(G)
+        b_count = self.count_pixel_label(B)
+        p_count = self.count_pixel_label(P)
+        
+        list = [r_count, g_count, b_count, p_count]
+        nums = sorted(list, reverse=True)
+        index = list.index(nums[0])     
+        normalized_mask = (mask[:, :, index] == 255) * 255. 
+
         return normalized_mask
+    
+    def count_pixel_label(self, label):
+        
+        pixel_values, count = np.unique(label, return_counts=True)
+        
+        if 255 in pixel_values :
+            result = count[-1]
+        else:
+            result = 0
+                
+        return result
