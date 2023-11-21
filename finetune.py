@@ -358,15 +358,12 @@ class SAMFinetuner(pl.LightningModule):
             
             plt.figure(figsize=(10,10))
             plt.imshow(img)
-            gt_mask = gt_mask.detach().cpu().numpy()
             
             ## pred_mask save
-            pred_mask = pred_mask.squeeze(0).squeeze(0).detach().cpu().numpy().astype(int)
-            # pred_mask = pred_mask.detach().cpu().numpy().astype(int)
             pred_mask = pred_mask > 0.0
+            show_mask(pred_mask, plt.gca(), gt_class)
 
             iou, f_score, precision, recall = calculate_metrics(pred_mask, gt_mask)
-            show_mask(pred_mask, plt.gca(), gt_class)
             show_box(box.detach().cpu().numpy(), plt.gca())
             
             

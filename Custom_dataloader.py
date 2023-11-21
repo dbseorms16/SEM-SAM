@@ -25,7 +25,7 @@ class Custom_Dataset(Dataset):
         self.normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         self.image_resize = transforms.Resize((image_size, image_size), interpolation=Image.BILINEAR)
         
-        self.prompt_w = 50
+        self.prompt_w = 150
 
     def __len__(self):
         return len(self.x)

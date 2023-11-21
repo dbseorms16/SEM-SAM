@@ -135,8 +135,11 @@ class MaskDecoder(nn.Module):
             mask_slice = slice(1, None)
         else:
             mask_slice = slice(0, 1)
-        masks = masks[:, mask_slice, :, :]
+        masks_sam = masks[:, mask_slice, :, :]
         iou_pred = iou_pred[:, mask_slice]
+
+        masks_hq = masks[:,slice(self.num_mask_tokens-1, self.num_mask_tokens)]
+        masks = masks_sam + masks_hq
 
         # Prepare output
         return masks, iou_pred
@@ -191,8 +194,9 @@ class MaskDecoder(nn.Module):
         hyper_in = torch.stack(hyper_in_list, dim=1)
         b, c, h, w = upscaled_embedding_hq.shape
         # masks = (hyper_in @ upscaled_embedding_hq.view(b, c, h * w)).view(b, -1, h, w)
-        # masks_sam = (hyper_in[:,:self.num_mask_tokens-1] @ upscaled_embedding_sam.view(b, c, h * w)).view(b, -1, h, w)
-        masks = (hyper_in[:,self.num_mask_tokens-1:] @ upscaled_embedding_hq.view(b, c, h * w)).view(b, -1, h, w)
+        masks_sam = (hyper_in[:,:self.num_mask_tokens-1] @ upscaled_embedding_sam.view(b, c, h * w)).view(b, -1, h, w)
+        masks_sam_hq = (hyper_in[:,self.num_mask_tokens-1:] @ upscaled_embedding_hq.view(b, c, h * w)).view(b, -1, h, w)
+        masks = torch.cat([masks_sam,masks_sam_hq],dim=1)
 
         # Generate mask quality predictions
         iou_pred = self.iou_prediction_head(iou_token_out)
