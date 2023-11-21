@@ -25,7 +25,7 @@ class Custom_Dataset(Dataset):
         self.normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         self.image_resize = transforms.Resize((image_size, image_size), interpolation=Image.BILINEAR)
         
-        self.prompt_w = 150
+        self.prompt_w = 128
 
     def __len__(self):
         return len(self.x)
@@ -33,53 +33,59 @@ class Custom_Dataset(Dataset):
     def __getitem__(self, index):
         ## image preprocessing
         file_name = self.x[index]
-        image = Image.open(file_name).convert("RGB")
-        original_width, original_height = image.width, image.height
-        ratio_h = self.image_size / image.height
-        ratio_w = self.image_size / image.width
-        image = self.image_resize(image)
+        img = Image.open(file_name).convert("RGB")
+        original_width, original_height = img.width, img.height
+        ratio_h = self.image_size / img.height
+        ratio_w = self.image_size / img.width
+        image = self.image_resize(img)
         image = self.to_tensor(image)
         image = self.normalize(image)
-
         
-        # 30 pixels ranmdom box prompt generation
+        
         if self.phase == 'test':
-            box_x, box_y = int(original_width // 2) - (self.prompt_w//2), int(original_height // 2) - (self.prompt_w//2)
+            coord_x, coord_y = int(original_width // 2) - (self.prompt_w//2), int(original_height // 2) - (self.prompt_w//2)
         else:
-            box_x, box_y = random.randint(0, original_width - self.prompt_w), random.randint(0, original_height - self.prompt_w)
-        # box_x, box_y = random.randint(0, original_width - self.prompt_w), random.randint(0, original_height - self.prompt_w)
-        x, y, w = box_x, box_y, self.prompt_w 
-        bbox = [x, y, x + w, y + w]
+            coord_x, coord_y = random.randint(0, original_width * ratio_w - self.prompt_w - 1 ), random.randint(0, original_height * ratio_h - self.prompt_w -1 )
+            # coord_x, coord_y = random.randint(0, original_width - self.prompt_w), random.randint(0, original_height - self.prompt_w)
         
-        bboxes = []
+        ## define coordinates
+        x, y, w = coord_x, coord_y, self.prompt_w 
+        coord = [x, y, x + w, y + w]
+        
         masks = []
-
-        ## mask preprocessing
         mask = Image.open(self.mask[index]).convert('RGB')
+        mask = self.image_resize(mask)
         mask = np.array(mask) 
-        mask, gt_class = self.mask_normalize(mask, bbox)
-        mask = cv2.resize(mask, (self.image_size, self.image_size), interpolation=cv2.INTER_LINEAR)
+        mask, gt_class = self.mask_normalize(mask, coord)
         mask = (mask > 0.5).astype(np.uint8)
-            
-        normalized_bbox = [x * ratio_w, y * ratio_h, (x * ratio_w) + w, (y * ratio_h) + w]
-            
-        bboxes.append(normalized_bbox)
         masks.append(mask)
-
-        bboxes = np.stack(bboxes, axis=0)
         masks = np.stack(masks, axis=0)
+
+        bboxes = []
+        ## mask preprocessing
+        normalized_bbox = [x , y , x  + w, y + w]
+        bboxes.append(normalized_bbox)
+        bboxes = np.stack(bboxes, axis=0)
+            
+        prompt_imgs = []
+        ## ancor_image
+        prompt_img = image[:, int(y): int(y + w), int(x): int(x + w)]
+        
+        prompt_imgs.append(prompt_img)
+        prompt_imgs = torch.stack(prompt_imgs, axis=0)
         
         f_name = file_name.split('\\')
         f_name = f_name[2] + '_' + f_name[-1].split('.')[0]
         
-        return image, torch.tensor(bboxes), torch.tensor(masks).long(), f_name, gt_class
+        
+        return image, torch.tensor(bboxes), torch.tensor(masks).long(), prompt_imgs, f_name, gt_class
     
     
     @classmethod
     def collate_fn(cls, batch):
-        images, bboxes, masks, f_name, gt_class = zip(*batch)
+        images, bboxes, masks, prompt_imgs, f_name, gt_class = zip(*batch)
         images = torch.stack(images, dim=0)
-        return images, bboxes, masks, f_name, gt_class
+        return images, bboxes, masks, prompt_imgs, f_name, gt_class
     
     
     def load_dataset_folder(self):

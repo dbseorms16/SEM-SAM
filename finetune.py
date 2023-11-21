@@ -128,27 +128,31 @@ class SAMFinetuner(pl.LightningModule):
             for param in self.model.image_encoder.parameters():
                 param.requires_grad = False
         if freeze_prompt_encoder:
-            for param in self.model.prompt_encoder.parameters():
-                param.requires_grad = False
-        if freeze_mask_decoder:
-            for param in self.model.mask_decoder.parameters():
-                param.requires_grad = False
-        if train_VPT_decoder:
-            for k, v in self.model.mask_decoder.named_parameters():
-                if 'embedding_encoder' in k:
+            for k, v in self.model.prompt_encoder.named_parameters():
+                # param.requires_grad = False
+                if 'imgs_downscaling' in k:
                     v.requires_grad = True
 
-                if 'compress_vit_feat' in k:
-                    v.requires_grad = True
+        if freeze_mask_decoder:
+            for param in self.model.mask_decoder.parameters():
+                # param.requires_grad = False
+                param.requires_grad = True
+        # if train_VPT_decoder:
+        #     for k, v in self.model.mask_decoder.named_parameters():
+        #         if 'embedding_encoder' in k:
+        #             v.requires_grad = True
+
+        #         if 'compress_vit_feat' in k:
+        #             v.requires_grad = True
                     
-                if 'embedding_maskfeature' in k:
-                    v.requires_grad = True
+        #         if 'embedding_maskfeature' in k:
+        #             v.requires_grad = True
                     
-                if 'hf_token' in  k:
-                    v.requires_grad = True
+        #         if 'hf_token' in  k:
+        #             v.requires_grad = True
                     
-                if 'hf_mlp' in  k:
-                    v.requires_grad = True
+        #         if 'hf_mlp' in  k:
+        #             v.requires_grad = True
                 
             
         self.batch_size = batch_size
@@ -167,7 +171,7 @@ class SAMFinetuner(pl.LightningModule):
         self.validation_step_outputs = []
         self.test_step_outputs = []
         
-    def forward(self, imgs, bboxes, labels):
+    def forward(self, imgs, bboxes, labels, prompt_imgs):
         _, _, H, W = imgs.shape
         features, interm_embeddings = self.model.image_encoder(imgs)
         interm_embeddings = interm_embeddings[0] # early layer
@@ -177,12 +181,14 @@ class SAMFinetuner(pl.LightningModule):
         loss_focal = loss_dice = loss_iou = 0.
         predictions = []
         tp, fp, fn, tn = [], [], [], []
-        for feature, bbox, label, curr_interm in zip(features, bboxes, labels, interm_embeddings):
+        for feature, bbox, label, prompt_img, curr_interm in zip(features, bboxes, labels, prompt_imgs, interm_embeddings):
             # Embed prompts
-            sparse_embeddings, dense_embeddings = self.model.prompt_encoder(
+            sparse_embeddings, dense_embeddings, imgs_prompt_embeddings = self.model.prompt_encoder(
                 points=None,
-                boxes=bbox,
+                # boxes=bbox,
+                boxes=None,
                 masks=None,
+                imgs=prompt_img
             )
             # Predict masks
             low_res_masks, iou_predictions = self.model.mask_decoder(
@@ -191,7 +197,8 @@ class SAMFinetuner(pl.LightningModule):
                 sparse_prompt_embeddings=sparse_embeddings,
                 dense_prompt_embeddings=dense_embeddings,
                 multimask_output=False,
-                interm_embeddings = curr_interm.unsqueeze(0).unsqueeze(0)
+                interm_embeddings = curr_interm.unsqueeze(0).unsqueeze(0),
+                imgs_prompt_embeddings= imgs_prompt_embeddings
             )
             # Upscale the masks to the original image resolution
             masks = F.interpolate(
@@ -232,8 +239,8 @@ class SAMFinetuner(pl.LightningModule):
         }
     
     def training_step(self, batch, batch_nb):
-        imgs, bboxes, labels, _, _ = batch
-        outputs = self(imgs, bboxes, labels)
+        imgs, bboxes, labels, prompt_imgs, _, _ = batch
+        outputs = self(imgs, bboxes, labels, prompt_imgs)
 
         for metric in ['tp', 'fp', 'fn', 'tn']:
             self.train_metric[metric].append(outputs[metric])
@@ -252,8 +259,8 @@ class SAMFinetuner(pl.LightningModule):
         return metrics
     
     def validation_step(self, batch, batch_nb):
-        imgs, bboxes, labels, _, _ = batch
-        outputs = self(imgs, bboxes, labels)
+        imgs, bboxes, labels, prompt_imgs, _, _ = batch
+        outputs = self(imgs, bboxes, labels, prompt_imgs)
         
         val_average_iou = self.img_mask_save('validation', batch, outputs)
         
@@ -276,8 +283,8 @@ class SAMFinetuner(pl.LightningModule):
         
     
     def test_step(self, batch, batch_nb):
-        imgs, bboxes, labels, _, _ = batch
-        outputs = self(imgs, bboxes, labels)
+        imgs, bboxes, labels, prompt_imgs, _, _ = batch
+        outputs = self(imgs, bboxes, labels, prompt_imgs)
         
         test_average_iou = self.img_mask_save('test', batch, outputs)
         
@@ -356,11 +363,11 @@ class SAMFinetuner(pl.LightningModule):
 
     def img_mask_save(self, phase, batch, outputs):
         
-        imgs, bboxes, gt_masks, f_names, gt_classes= batch
+        imgs, bboxes, gt_masks, prompt_imgs, f_names, gt_classes= batch
         
         pred_masks = outputs['predictions']
         total_iou = 0
-        for i, (img, gt_mask, pred_mask, box, f_name, gt_class) in enumerate(zip(imgs, gt_masks, pred_masks, bboxes, f_names, gt_classes)):
+        for i, (img, gt_mask, pred_mask, box, prompt_img, f_name, gt_class) in enumerate(zip(imgs, gt_masks, pred_masks, bboxes, prompt_imgs, f_names, gt_classes)):
             img = img.permute(1,2,0).detach().cpu().numpy()
             img = DeNormalize(img).astype(int)
             

@@ -31,11 +31,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from torch import nn
-
 from typing import Any, Optional, Tuple, Type
-
 from .common import LayerNorm2d
 
+from .resnet import resnet50, ResNet50_Weights
+
+# import torchvision.models.resnet
 
 class PromptEncoder(nn.Module):
     def __init__(
@@ -81,7 +82,22 @@ class PromptEncoder(nn.Module):
             activation(),
             nn.Conv2d(mask_in_chans, embed_dim, kernel_size=1),
         )
+        
+        self.imgs_downscaling = nn.Sequential(
+            nn.Conv2d(3, mask_in_chans // 2, kernel_size=3, stride=2, padding=1),
+            LayerNorm2d(mask_in_chans // 2),
+            activation(),
+            nn.Conv2d(mask_in_chans // 2, mask_in_chans // 4, kernel_size=1),
+            LayerNorm2d(mask_in_chans // 4),
+            activation(),
+            nn.Conv2d(mask_in_chans // 4, mask_in_chans, kernel_size=1),
+            LayerNorm2d(mask_in_chans),
+            activation(),
+            nn.Conv2d(mask_in_chans, embed_dim, kernel_size=1),
+        )
+
         self.no_mask_embed = nn.Embedding(1, embed_dim)
+        self.no_imgs_embed = nn.Embedding(1, embed_dim)
 
     def get_dense_pe(self) -> torch.Tensor:
         """
@@ -128,6 +144,11 @@ class PromptEncoder(nn.Module):
         mask_embedding = self.mask_downscaling(masks)
         return mask_embedding
 
+    def _embed_imags(self, imgs: torch.Tensor) -> torch.Tensor:
+        """imgs mask inputs."""
+        imgs_embedding = self.imgs_downscaling(imgs)
+        return imgs_embedding
+    
     def _get_batch_size(
         self,
         points: Optional[Tuple[torch.Tensor, torch.Tensor]],
@@ -154,6 +175,7 @@ class PromptEncoder(nn.Module):
         points: Optional[Tuple[torch.Tensor, torch.Tensor]],
         boxes: Optional[torch.Tensor],
         masks: Optional[torch.Tensor],
+        imgs: None 
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Embeds different types of prompts, returning both sparse and dense
@@ -188,8 +210,14 @@ class PromptEncoder(nn.Module):
             dense_embeddings = self.no_mask_embed.weight.reshape(1, -1, 1, 1).expand(
                 bs, -1, self.image_embedding_size[0], self.image_embedding_size[1]
             )
-
-        return sparse_embeddings, dense_embeddings
+        if imgs is not None:
+            imgs_dense_embeddings = self._embed_imags(imgs)
+        else:
+            imgs_dense_embeddings = self.no_imgs_embed.weight.reshape(1, -1, 1, 1).expand(
+                bs, -1, self.image_embedding_size[0], self.image_embedding_size[1]
+            )
+            
+        return sparse_embeddings, dense_embeddings, imgs_dense_embeddings
 
 
 class PositionEmbeddingRandom(nn.Module):

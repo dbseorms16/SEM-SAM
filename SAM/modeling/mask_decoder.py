@@ -103,6 +103,7 @@ class MaskDecoder(nn.Module):
         dense_prompt_embeddings: torch.Tensor,
         multimask_output: bool,
         interm_embeddings: torch.Tensor,
+        imgs_prompt_embeddings: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Predict masks given image and prompt embeddings.
@@ -127,7 +128,8 @@ class MaskDecoder(nn.Module):
             image_pe=image_pe,
             sparse_prompt_embeddings=sparse_prompt_embeddings,
             dense_prompt_embeddings=dense_prompt_embeddings,
-            hq_features=hq_features
+            hq_features=hq_features,
+            imgs_prompt_embeddings=imgs_prompt_embeddings
         )
 
         # Select the correct mask or masks for output
@@ -150,7 +152,8 @@ class MaskDecoder(nn.Module):
         image_pe: torch.Tensor,
         sparse_prompt_embeddings: torch.Tensor,
         dense_prompt_embeddings: torch.Tensor,
-        hq_features: torch.Tensor
+        hq_features: torch.Tensor,
+        imgs_prompt_embeddings: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Predicts masks. See 'forward' for more details."""
         # Concatenate output tokens
@@ -166,6 +169,9 @@ class MaskDecoder(nn.Module):
         # Expand per-image data in batch direction to be per-mask
         src = torch.repeat_interleave(image_embeddings, tokens.shape[0], dim=0)
         src = src + dense_prompt_embeddings
+        ## add_imgs_prompt
+        src = src + imgs_prompt_embeddings
+        
         pos_src = torch.repeat_interleave(image_pe, tokens.shape[0], dim=0)
         b, c, h, w = src.shape
 
