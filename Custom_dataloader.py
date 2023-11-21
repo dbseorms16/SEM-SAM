@@ -43,8 +43,11 @@ class Custom_Dataset(Dataset):
 
         
         # 30 pixels ranmdom box prompt generation
-        
-        box_x, box_y = random.randint(0, original_width - self.prompt_w), random.randint(0, original_height - self.prompt_w)
+        if self.phase == 'test':
+            box_x, box_y = int(original_width // 2) - (self.prompt_w//2), int(original_height // 2) - (self.prompt_w//2)
+        else:
+            box_x, box_y = random.randint(0, original_width - self.prompt_w), random.randint(0, original_height - self.prompt_w)
+        # box_x, box_y = random.randint(0, original_width - self.prompt_w), random.randint(0, original_height - self.prompt_w)
         x, y, w = box_x, box_y, self.prompt_w 
         bbox = [x, y, x + w, y + w]
         

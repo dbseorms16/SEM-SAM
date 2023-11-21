@@ -135,12 +135,21 @@ class SAMFinetuner(pl.LightningModule):
                 param.requires_grad = False
         if train_VPT_decoder:
             for k, v in self.model.mask_decoder.named_parameters():
-
-                if 'embedding_maskfeature' or 'embedding_encoder' or 'compress_vit_feat'  in k:
+                if 'embedding_encoder' in k:
                     v.requires_grad = True
-                if 'hf_token' or b'hf_mlp' in k:
+
+                if 'compress_vit_feat' in k:
                     v.requires_grad = True
                     
+                if 'embedding_maskfeature' in k:
+                    v.requires_grad = True
+                    
+                if 'hf_token' in  k:
+                    v.requires_grad = True
+                    
+                if 'hf_mlp' in  k:
+                    v.requires_grad = True
+                
             
         self.batch_size = batch_size
         self.learning_rate = learning_rate
@@ -246,16 +255,16 @@ class SAMFinetuner(pl.LightningModule):
         imgs, bboxes, labels, _, _ = batch
         outputs = self(imgs, bboxes, labels)
         
-        self.img_mask_save('validation',batch, outputs)
+        val_average_iou = self.img_mask_save('validation', batch, outputs)
         
         for metric in ['tp', 'fp', 'fn', 'tn']:
             self.val_metric[metric].append(outputs[metric])
         # aggregate step metics
-        step_metrics = [torch.cat(list(self.val_metric[metric])) for metric in ['tp', 'fp', 'fn', 'tn']]
-        per_mask_iou = smp.metrics.iou_score(*step_metrics, reduction="micro-imagewise")
-        self.validation_step_outputs.append(per_mask_iou)
-        metrics = {"val_per_mask_iou": per_mask_iou}
-        self.log("val_per_mask_iou", per_mask_iou, sync_dist=True)
+        # step_metrics = [torch.cat(list(self.val_metric[metric])) for metric in ['tp', 'fp', 'fn', 'tn']]
+        # per_mask_iou = smp.metrics.iou_score(*step_metrics, reduction="micro-imagewise")
+        self.validation_step_outputs.append(val_average_iou)
+        metrics = {"val_per_mask_iou": val_average_iou}
+        self.log("val_per_mask_iou", val_average_iou, sync_dist=True)
         
         return metrics
     
@@ -270,7 +279,7 @@ class SAMFinetuner(pl.LightningModule):
         imgs, bboxes, labels, _, _ = batch
         outputs = self(imgs, bboxes, labels)
         
-        self.img_mask_save('test', batch, outputs)
+        test_average_iou = self.img_mask_save('test', batch, outputs)
         
         ## validation log 
         for metric in ['tp', 'fp', 'fn', 'tn']:
@@ -281,14 +290,13 @@ class SAMFinetuner(pl.LightningModule):
         self.validation_step_outputs.append(per_mask_iou)
         metrics = {"test_per_mask_iou": per_mask_iou}
         # self.log_dict(metrics)
-        self.log("test_per_mask_iou", per_mask_iou, sync_dist=True)
+        self.log("test_average_iou", test_average_iou, sync_dist=True)
         
         return metrics
 
     def on_test_epoch_end(self):
-        print('test_end')
-        epoch_average = torch.stack(self.validation_step_outputs).mean()
-        self.log("test_epoch_average iou", epoch_average, sync_dist=True)
+        # epoch_average = torch.stack(self.validation_step_outputs).mean()
+        # self.log("test_epoch_average iou", epoch_average, sync_dist=True)
         self.validation_step_outputs.clear()  # free memory
         
     def configure_optimizers(self):
@@ -351,7 +359,7 @@ class SAMFinetuner(pl.LightningModule):
         imgs, bboxes, gt_masks, f_names, gt_classes= batch
         
         pred_masks = outputs['predictions']
-
+        total_iou = 0
         for i, (img, gt_mask, pred_mask, box, f_name, gt_class) in enumerate(zip(imgs, gt_masks, pred_masks, bboxes, f_names, gt_classes)):
             img = img.permute(1,2,0).detach().cpu().numpy()
             img = DeNormalize(img).astype(int)
@@ -366,7 +374,7 @@ class SAMFinetuner(pl.LightningModule):
             iou, f_score, precision, recall = calculate_metrics(pred_mask, gt_mask)
             show_box(box.detach().cpu().numpy(), plt.gca())
             
-            
+            total_iou += iou
             plt.title(f"Mask {i+1}, IOU: {iou:.3f}, F-score: {f_score:.3f}, precision: {precision:.3f}, recall: {recall:.3f}", fontsize=12)
             plt.axis('off')
             filename = f"{f_name}_pred.png"
@@ -385,6 +393,8 @@ class SAMFinetuner(pl.LightningModule):
             filename = f"{f_name}_gt.png"
             plt.savefig(os.path.join(self.save_base, phase, filename), bbox_inches='tight', pad_inches=0)
             plt.close()
+        
+        return total_iou / (i+1)
             
 
 def main():
