@@ -1,7 +1,7 @@
 python finetune.py \
     --data_root ./dataset \
     --model_type vit_h \
-    --checkpoint_path ./pre_trained/sam_vit_h_4b8939.pth \
+    --checkpoint_path ./checkpoints/sam_vit_h_4b8939.pth \
     --freeze_image_encoder \
     --freeze_mask_decoder \
     --freeze_prompt_encoder \

@@ -38,8 +38,12 @@ class Custom_Dataset(Dataset):
         ratio_h = self.image_size / img.height
         ratio_w = self.image_size / img.width
         image = self.image_resize(img)
+        gray = cv2.cvtColor(np.array(image), cv2.COLOR_BGR2GRAY)
+        
         image = self.to_tensor(image)
         image = self.normalize(image)
+        
+        gray = self.to_tensor(gray)
         
         
         if self.phase == 'test':
@@ -69,8 +73,10 @@ class Custom_Dataset(Dataset):
             
         prompt_imgs = []
         ## ancor_image
-        prompt_img = image[:, int(y): int(y + w), int(x): int(x + w)]
+        # prompt_img = image[:, int(y): int(y + w), int(x): int(x + w)]
+        prompt_img = gray[:, int(y): int(y + w), int(x): int(x + w)]
         
+
         prompt_imgs.append(prompt_img)
         prompt_imgs = torch.stack(prompt_imgs, axis=0)
         

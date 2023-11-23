@@ -125,13 +125,16 @@ class SAMFinetuner(pl.LightningModule):
         self.model.to(device=self.device)
         self.freeze_image_encoder = freeze_image_encoder
         if freeze_image_encoder:
-            for param in self.model.image_encoder.parameters():
-                param.requires_grad = False
+            for k, v in self.model.image_encoder.named_parameters():
+                v.requires_grad = False
+                
         if freeze_prompt_encoder:
             for k, v in self.model.prompt_encoder.named_parameters():
                 # param.requires_grad = False
-                if 'imgs_downscaling' in k:
+                if 'box_prompt_modulate' in k:
                     v.requires_grad = True
+                else:
+                    v.requires_grad = False
 
         if freeze_mask_decoder:
             for param in self.model.mask_decoder.parameters():
@@ -186,9 +189,10 @@ class SAMFinetuner(pl.LightningModule):
             sparse_embeddings, dense_embeddings, imgs_prompt_embeddings = self.model.prompt_encoder(
                 points=None,
                 # boxes=bbox,
-                boxes=None,
+                boxes=bbox,
                 masks=None,
-                imgs=prompt_img
+                image_features=feature,
+                imgs=None
             )
             # Predict masks
             low_res_masks, iou_predictions = self.model.mask_decoder(

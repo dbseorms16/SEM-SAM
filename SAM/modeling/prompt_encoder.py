@@ -34,7 +34,6 @@ from torch import nn
 from typing import Any, Optional, Tuple, Type
 from .common import LayerNorm2d
 
-from .resnet import resnet50, ResNet50_Weights
 
 # import torchvision.models.resnet
 
@@ -83,19 +82,21 @@ class PromptEncoder(nn.Module):
             nn.Conv2d(mask_in_chans, embed_dim, kernel_size=1),
         )
         
-        self.imgs_downscaling = nn.Sequential(
-            nn.Conv2d(3, mask_in_chans // 2, kernel_size=3, stride=2, padding=1),
-            LayerNorm2d(mask_in_chans // 2),
-            activation(),
-            nn.Conv2d(mask_in_chans // 2, mask_in_chans // 4, kernel_size=1),
-            LayerNorm2d(mask_in_chans // 4),
-            activation(),
-            nn.Conv2d(mask_in_chans // 4, mask_in_chans, kernel_size=1),
-            LayerNorm2d(mask_in_chans),
-            activation(),
-            nn.Conv2d(mask_in_chans, embed_dim, kernel_size=1),
+        ### Box prompt modulated
+        mlp_dim = 2048
+        num_heads= 8
+        attention_downsample_rate= 2
+        self.box_prompt_modulate = TwoWayAttentionBlock(
+            embedding_dim=embed_dim,
+            num_heads=num_heads,
+            mlp_dim=mlp_dim,
+            activation=activation,
+            attention_downsample_rate=attention_downsample_rate,
+            skip_first_layer_pe=False,
+            # skip_first_layer_pe=True,
         )
-
+        
+        
         self.no_mask_embed = nn.Embedding(1, embed_dim)
         self.no_imgs_embed = nn.Embedding(1, embed_dim)
 
@@ -130,11 +131,28 @@ class PromptEncoder(nn.Module):
         point_embedding[labels == 1] += self.point_embeddings[1].weight
         return point_embedding
 
-    def _embed_boxes(self, boxes: torch.Tensor) -> torch.Tensor:
+    def _embed_boxes(self, boxes: torch.Tensor, image_features: torch.Tensor) -> torch.Tensor:
         """Embeds box prompts."""
         boxes = boxes + 0.5  # Shift to center of pixel
         coords = boxes.reshape(-1, 2, 2)
         corner_embedding = self.pe_layer.forward_with_coords(coords, self.input_image_size)
+        
+        ### box modulate
+        image_embedding = image_features.flatten(1).unsqueeze(0).permute(0, 2, 1)
+        image_pe = self.get_dense_pe().flatten(2).permute(0, 2, 1)
+        
+        queries = corner_embedding
+        keys = image_embedding
+        
+        queries, keys = self.box_prompt_modulate(
+            queries=queries,
+            keys=keys,
+            query_pe=corner_embedding,
+            key_pe=image_pe,
+            )
+        corner_embedding = corner_embedding + queries
+        #####
+                
         corner_embedding[:, 0, :] += self.point_embeddings[2].weight
         corner_embedding[:, 1, :] += self.point_embeddings[3].weight
         return corner_embedding
@@ -175,6 +193,7 @@ class PromptEncoder(nn.Module):
         points: Optional[Tuple[torch.Tensor, torch.Tensor]],
         boxes: Optional[torch.Tensor],
         masks: Optional[torch.Tensor],
+        image_features: Optional[torch.Tensor],
         imgs: None 
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -201,7 +220,7 @@ class PromptEncoder(nn.Module):
             point_embeddings = self._embed_points(coords, labels, pad=(boxes is None))
             sparse_embeddings = torch.cat([sparse_embeddings, point_embeddings], dim=1)
         if boxes is not None:
-            box_embeddings = self._embed_boxes(boxes)
+            box_embeddings = self._embed_boxes(boxes, image_features)
             sparse_embeddings = torch.cat([sparse_embeddings, box_embeddings], dim=1)
 
         if masks is not None:
