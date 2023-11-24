@@ -27,6 +27,8 @@ import matplotlib.pyplot as plt
 
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
+import torchvision
+from torchvision.models._utils import IntermediateLayerGetter
 
 import numpy as np
 import torch
@@ -97,6 +99,14 @@ class PromptEncoder(nn.Module):
         )
         
         
+        self.patch_backbone = Backbone('resnet50',
+                    train_backbone=True,
+                    return_layer='layer3',
+                    frozen_bn=False,
+                    dilation=False)
+        self.EPF_extractor = DirectPooling(input_dim=1024, hidden_dim=256)  # pooling used for the query patch feature
+        
+        self.matcher = InnerProductMatcher()
         self.no_mask_embed = nn.Embedding(1, embed_dim)
         self.no_imgs_embed = nn.Embedding(1, embed_dim)
 
@@ -131,26 +141,37 @@ class PromptEncoder(nn.Module):
         point_embedding[labels == 1] += self.point_embeddings[1].weight
         return point_embedding
 
-    def _embed_boxes(self, boxes: torch.Tensor, image_features: torch.Tensor) -> torch.Tensor:
+    def _embed_boxes(self, boxes: torch.Tensor, image_features: torch.Tensor, prompt_img_patch: torch.Tensor) -> torch.Tensor:
         """Embeds box prompts."""
         boxes = boxes + 0.5  # Shift to center of pixel
         coords = boxes.reshape(-1, 2, 2)
-        corner_embedding = self.pe_layer.forward_with_coords(coords, self.input_image_size)
+        # corner_embedding = self.pe_layer.forward_with_coords(coords, self.input_image_size)
         
+        prompt_img_patch_feautre = self.patch_backbone(prompt_img_patch)
+        tmp_patch = self.EPF_extractor(prompt_img_patch_feautre) # compress the feature maps into vectors and inject scale embeddings
+        
+        ##                                      256 64 64, num_img 1 256
+        _, corr_map = self.matcher(image_features, tmp_patch)
+        ## 1 3 128 128
+        # print(prompt_img_patch.size())
+        ## 1 1024 8 8
+        # print(prompt_img_patch_feautre.size())
+        # num_img 1 256
         ### box modulate
-        image_embedding = image_features.flatten(1).unsqueeze(0).permute(0, 2, 1)
+        # image_embedding = image_features.flatten(1).unsqueeze(0).permute(0, 2, 1)
         image_pe = self.get_dense_pe().flatten(2).permute(0, 2, 1)
-        
-        queries = corner_embedding
-        keys = image_embedding
+        # 1 256 4096
+        queries = image_features.flatten(1).unsqueeze(0).permute(0, 2, 1)
+        ## 1 4096 1
+        keys = corr_map.repeat(1, 1, 256)
         
         queries, keys = self.box_prompt_modulate(
             queries=queries,
             keys=keys,
-            query_pe=corner_embedding,
+            query_pe=image_pe,
             key_pe=image_pe,
             )
-        corner_embedding = corner_embedding + queries
+        corner_embedding = queries
         #####
                 
         corner_embedding[:, 0, :] += self.point_embeddings[2].weight
@@ -194,7 +215,7 @@ class PromptEncoder(nn.Module):
         boxes: Optional[torch.Tensor],
         masks: Optional[torch.Tensor],
         image_features: Optional[torch.Tensor],
-        imgs: None 
+        prompt_img_patch: Optional[torch.Tensor] 
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Embeds different types of prompts, returning both sparse and dense
@@ -220,7 +241,7 @@ class PromptEncoder(nn.Module):
             point_embeddings = self._embed_points(coords, labels, pad=(boxes is None))
             sparse_embeddings = torch.cat([sparse_embeddings, point_embeddings], dim=1)
         if boxes is not None:
-            box_embeddings = self._embed_boxes(boxes, image_features)
+            box_embeddings = self._embed_boxes(boxes, image_features, prompt_img_patch)
             sparse_embeddings = torch.cat([sparse_embeddings, box_embeddings], dim=1)
 
         if masks is not None:
@@ -229,14 +250,67 @@ class PromptEncoder(nn.Module):
             dense_embeddings = self.no_mask_embed.weight.reshape(1, -1, 1, 1).expand(
                 bs, -1, self.image_embedding_size[0], self.image_embedding_size[1]
             )
-        if imgs is not None:
-            imgs_dense_embeddings = self._embed_imags(imgs)
-        else:
-            imgs_dense_embeddings = self.no_imgs_embed.weight.reshape(1, -1, 1, 1).expand(
-                bs, -1, self.image_embedding_size[0], self.image_embedding_size[1]
-            )
+        # if imgs is not None:
+        #     imgs_dense_embeddings = self._embed_imags(imgs)
+        # else:
+        #     imgs_dense_embeddings = self.no_imgs_embed.weight.reshape(1, -1, 1, 1).expand(
+        #         bs, -1, self.image_embedding_size[0], self.image_embedding_size[1]
+            # )
             
-        return sparse_embeddings, dense_embeddings, imgs_dense_embeddings
+        return sparse_embeddings, dense_embeddings
+
+class BackboneBase(nn.Module):
+    def __init__(self, backbone: nn.Module, train_backbone: bool, num_channels: int, return_layer: str):
+        super().__init__()
+        for name, parameter in backbone.named_parameters():
+            if not train_backbone or 'layer2' not in name and 'layer3' not in name and 'layer4' not in name:
+            #if not train_backbone:
+                parameter.requires_grad_(False)
+        
+        return_layers = {return_layer: '0'}
+        self.body = IntermediateLayerGetter(backbone, return_layers=return_layers)
+        self.num_channels = num_channels
+
+    def forward(self, tensor_list):
+        """supports both NestedTensor and torch.Tensor
+        """
+        out = self.body(tensor_list)
+        return out['0']
+
+class Backbone(BackboneBase):
+    """ResNet backbone with frozen BatchNorm."""
+
+    def __init__(self, name: str,
+                 train_backbone: bool,
+                 return_layer: str,
+                 frozen_bn: bool,
+                 dilation: bool):
+        
+        if frozen_bn:
+            backbone = getattr(torchvision.models, name)(
+                               replace_stride_with_dilation=[False, False, dilation],
+                               pretrained=True, norm_layer=FrozenBatchNorm2d)
+        else:
+            backbone = getattr(torchvision.models, name)(
+                               replace_stride_with_dilation=[False, False, dilation],
+                               pretrained=True)
+            
+        # load the SwAV pre-training model from the url instead of supervised pre-training model
+        if name == 'resnet50':
+            #checkpoint = torch.hub.load_state_dict_from_url('https://dl.fbaipublicfiles.com/deepcluster/swav_800ep_pretrain.pth.tar',map_location="cpu")
+            checkpoint = torch.hub.load_state_dict_from_url('https://download.pytorch.org/models/resnet50-19c8e357.pth',map_location="cpu")
+            #checkpoint = torch.load('nvidia_resnet50_200821.pth.tar')
+            state_dict = {k.replace("module.", ""): v for k, v in checkpoint.items()}
+            backbone.load_state_dict(state_dict, strict=False)
+            #pass
+        if name in ('resnet18', 'resnet34'):
+            num_channels = 512
+        else:
+            if return_layer == 'layer3':
+                num_channels = 1024
+            else:
+                num_channels = 2048
+        super().__init__(backbone, train_backbone, num_channels, return_layer)
 
 
 class PositionEmbeddingRandom(nn.Module):
@@ -285,6 +359,43 @@ class PositionEmbeddingRandom(nn.Module):
         return self._pe_encoding(coords.to(torch.float))  # B x N x C
 
 
+class FrozenBatchNorm2d(torch.nn.Module):
+    """
+    BatchNorm2d where the batch statistics and the affine parameters are fixed.
+
+    Copy-paste from torchvision.misc.ops with added eps before rqsrt,
+    without which any other models than torchvision.models.resnet[18,34,50,101]
+    produce nans.
+    """
+    def __init__(self, n):
+        super(FrozenBatchNorm2d, self).__init__()
+        self.register_buffer("weight", torch.ones(n))
+        self.register_buffer("bias", torch.zeros(n))
+        self.register_buffer("running_mean", torch.zeros(n))
+        self.register_buffer("running_var", torch.ones(n))
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        num_batches_tracked_key = prefix + 'num_batches_tracked'
+        if num_batches_tracked_key in state_dict:
+            del state_dict[num_batches_tracked_key]
+
+        super(FrozenBatchNorm2d, self)._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict,
+            missing_keys, unexpected_keys, error_msgs)
+
+    def forward(self, x):
+        # move reshapes to the beginning
+        # to make it fuser-friendly
+        w = self.weight.reshape(1, -1, 1, 1)
+        b = self.bias.reshape(1, -1, 1, 1)
+        rv = self.running_var.reshape(1, -1, 1, 1)
+        rm = self.running_mean.reshape(1, -1, 1, 1)
+        eps = 1e-5
+        scale = w * (rv + eps).rsqrt()
+        bias = b - rm * scale
+        return x * scale + bias
+    
 def save_plt(image, path=None):
     if type(image) is torch.Tensor:
         image = image.detach().cpu().numpy()
@@ -294,3 +405,137 @@ def save_plt(image, path=None):
     filename = f"{path}.png"
     plt.savefig(os.path.join(save_base, filename), bbox_inches='tight', pad_inches=0)
     plt.close()
+
+"""
+Class agnostic counting
+Feature extractors for exemplars.
+"""
+from torch import nn
+import pdb
+class DirectPooling(nn.Module):
+    def __init__(self, input_dim, hidden_dim, repeat_times=1, use_scale_embedding=True, scale_number=20):
+        super().__init__()
+        self.repeat_times = repeat_times
+        self.use_scale_embedding = use_scale_embedding
+        self.patch2query = nn.Linear(input_dim, hidden_dim) # align the patch feature dim to query patch dim.
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))  # pooling used for the query patch feature
+        self._weight_init_()
+        # if self.use_scale_embedding:
+        #     self.scale_embedding = nn.Embedding(scale_number, hidden_dim)
+    
+    def forward(self, patch_feature):
+        batch_num_patches = patch_feature.shape[0]
+        patch_feature = self.avgpool(patch_feature).flatten(1) # bs X patchnumber X feature_dim
+        #patch_feature = patch_feature \
+        patch_feature = self.patch2query(patch_feature) \
+            .view(1, batch_num_patches, -1) \
+            .repeat_interleave(self.repeat_times, dim=1) \
+            .permute(1, 0, 2) \
+            .contiguous() 
+        # if self.use_scale_embedding:
+        #     scale_embedding = self.scale_embedding(scale_index) # bs X number_query X dim
+        #     patch_feature = patch_feature + scale_embedding.permute(1, 0, 2)
+        
+        return patch_feature
+    
+    def _weight_init_(self):
+        for p in self.parameters():
+                if p.dim() > 1:
+                    nn.init.xavier_uniform_(p)
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.normal_(m.weight, std=0.01)
+                # nn.init.kaiming_uniform_(
+                #         m.weight, 
+                #         mode='fan_in', 
+                #         nonlinearity='relu'
+                #         )
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
+class DynamicSimilarityMatcher(nn.Module):
+    def __init__(self, hidden_dim, proj_dim, dynamic_proj_dim, activation='tanh', pool='mean', use_bias=False):
+        super().__init__()
+        self.query_conv = nn.Linear(in_features=hidden_dim, out_features=proj_dim, bias=use_bias)
+        self.key_conv = nn.Linear(in_features=hidden_dim, out_features=proj_dim, bias=use_bias)
+        self.dynamic_pattern_conv = nn.Sequential(nn.Linear(in_features=proj_dim, out_features=dynamic_proj_dim),
+                                          nn.ReLU(),
+                                          nn.Linear(in_features=dynamic_proj_dim, out_features=proj_dim))
+        
+        self.softmax  = nn.Softmax(dim=-1)
+        self._weight_init_()
+        
+        if activation == 'relu':
+            self.activation = nn.ReLU()
+        elif activation == 'leaky_relu':
+            self.activation = nn.LeakyReLU()
+        elif activation == 'sigmoid':
+            self.activation = nn.Sigmoid()
+        elif activation == 'tanh':
+            self.activation = nn.Tanh()
+        elif activation == 'none':
+            self.activation = None
+        else:
+            raise NotImplementedError
+            
+    def forward(self, features, patches):
+        bs, c, h, w = features.shape
+        features = features.flatten(2).permute(2, 0, 1)  # hw * bs * dim
+        
+        proj_feat = self.query_conv(features)
+        patches_feat = self.key_conv(patches)
+        patches_ca = self.activation(self.dynamic_pattern_conv(patches_feat))
+        
+        proj_feat = proj_feat.permute(1, 0, 2)
+        patches_feat = (patches_feat * (patches_ca + 1)).permute(1, 2, 0)  # bs * c * exemplar_number        
+        energy = torch.bmm(proj_feat, patches_feat)                        # bs * hw * exemplar_number
+
+        corr = energy.mean(dim=-1, keepdim=True)
+        out = features.permute(1,0,2)  # hw * bs * c
+        out = torch.cat((out, corr), dim=-1)
+        
+        out = out.permute(1,0,2)
+        return out.permute(1, 2, 0).view(bs, c+1, h, w), energy 
+    
+    def _weight_init_(self):
+        for p in self.parameters():
+                if p.dim() > 1:
+                    nn.init.xavier_uniform_(p)
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.normal_(m.weight, std=0.01)
+                # nn.init.kaiming_uniform_(
+                #         m.weight, 
+                #         mode='fan_in', 
+                #         nonlinearity='relu'
+                #         )
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
+class InnerProductMatcher(nn.Module):
+    def __init__(self, pool='mean'):
+        super().__init__()
+        self.pool = pool
+    
+    def forward(self, features, patches_feat):
+        # bs, c, h, w = features.shape
+        ##                                      256 64 64, num_img 1 256
+        
+        c, h, w = features.shape
+        # 4096, 256
+        features = features.flatten(1).permute(1, 0).unsqueeze(0)
+        # 256, exeplar_num 
+        patches_feat = patches_feat.permute(1, 2, 0)      # bs * c * exemplar_number
+        energy = torch.bmm(features, patches_feat)       # bs * hw * exemplar_number
+        if self.pool == 'mean':
+            corr = energy.mean(dim=-1, keepdim=True)
+        elif self.pool == 'max':
+            corr = energy.max(dim=-1, keepdim=True)[0]
+        out = torch.cat((features, corr), dim=-1) # bs * hw * dim
+        return out.permute(0, 2, 1).view(1, c+1, h, w), energy

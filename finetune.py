@@ -133,6 +133,12 @@ class SAMFinetuner(pl.LightningModule):
                 # param.requires_grad = False
                 if 'box_prompt_modulate' in k:
                     v.requires_grad = True
+                if 'patch_backbone' in k:
+                    v.requires_grad = True
+                if 'EPF_extractor' in k:
+                    v.requires_grad = True
+                if 'matcher' in k:
+                    v.requires_grad = True
                 else:
                     v.requires_grad = False
 
@@ -186,13 +192,17 @@ class SAMFinetuner(pl.LightningModule):
         tp, fp, fn, tn = [], [], [], []
         for feature, bbox, label, prompt_img, curr_interm in zip(features, bboxes, labels, prompt_imgs, interm_embeddings):
             # Embed prompts
-            sparse_embeddings, dense_embeddings, imgs_prompt_embeddings = self.model.prompt_encoder(
+            # print(imgs.size())
+            # print(prompt_img.size())
+            # a, b = self.model.image_encoder(prompt_img)
+            
+            sparse_embeddings, dense_embeddings = self.model.prompt_encoder(
                 points=None,
                 # boxes=bbox,
                 boxes=bbox,
                 masks=None,
                 image_features=feature,
-                imgs=None
+                prompt_img_patch=prompt_img
             )
             # Predict masks
             low_res_masks, iou_predictions = self.model.mask_decoder(
@@ -202,7 +212,6 @@ class SAMFinetuner(pl.LightningModule):
                 dense_prompt_embeddings=dense_embeddings,
                 multimask_output=False,
                 interm_embeddings = curr_interm.unsqueeze(0).unsqueeze(0),
-                imgs_prompt_embeddings= imgs_prompt_embeddings
             )
             # Upscale the masks to the original image resolution
             masks = F.interpolate(

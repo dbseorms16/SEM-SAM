@@ -6,9 +6,9 @@ python finetune.py \
     --freeze_mask_decoder \
     --freeze_prompt_encoder \
     --train_VPT_decoder \
-    --batch_size 4 \
+    --batch_size 3 \
     --image_size 1024 \
     --steps 1500000 \
-    --learning_rate 1.e-3 \
+    --learning_rate 1.e-4 \
     --weight_decay 0.01 \
-    --metrics_interval 185
+    --metrics_interval 490

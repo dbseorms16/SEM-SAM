@@ -38,12 +38,11 @@ class Custom_Dataset(Dataset):
         ratio_h = self.image_size / img.height
         ratio_w = self.image_size / img.width
         image = self.image_resize(img)
-        gray = cv2.cvtColor(np.array(image), cv2.COLOR_BGR2GRAY)
-        
+        # gray = cv2.cvtColor(np.array(image), cv2.COLOR_BGR2GRAY)
         image = self.to_tensor(image)
         image = self.normalize(image)
         
-        gray = self.to_tensor(gray)
+        # gray = self.to_tensor(gray)
         
         
         if self.phase == 'test':
@@ -54,29 +53,27 @@ class Custom_Dataset(Dataset):
         
         ## define coordinates
         x, y, w = coord_x, coord_y, self.prompt_w 
-        coord = [x, y, x + w, y + w]
+        normalized_bbox = [int(x * ratio_w), int(y * ratio_h) , int((x + w) * ratio_w), int((y + w) * ratio_h)]
         
         masks = []
         mask = Image.open(self.mask[index]).convert('RGB')
         mask = self.image_resize(mask)
         mask = np.array(mask) 
-        mask, gt_class = self.mask_normalize(mask, coord)
+        mask, gt_class = self.mask_normalize(mask, normalized_bbox)
         mask = (mask > 0.5).astype(np.uint8)
         masks.append(mask)
         masks = np.stack(masks, axis=0)
 
         bboxes = []
         ## mask preprocessing
-        normalized_bbox = [x , y , x  + w, y + w]
         bboxes.append(normalized_bbox)
         bboxes = np.stack(bboxes, axis=0)
             
         prompt_imgs = []
         ## ancor_image
-        # prompt_img = image[:, int(y): int(y + w), int(x): int(x + w)]
-        prompt_img = gray[:, int(y): int(y + w), int(x): int(x + w)]
+        prompt_img = image[:, int(y*ratio_h): int((y+w)*ratio_h), int(x * ratio_w): int((x + w) * ratio_w)]
+        # prompt_img = img[:, int(y): int(y + w), int(x): int(x + w)]
         
-
         prompt_imgs.append(prompt_img)
         prompt_imgs = torch.stack(prompt_imgs, axis=0)
         
