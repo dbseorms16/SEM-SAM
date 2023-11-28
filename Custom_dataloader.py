@@ -25,7 +25,7 @@ class Custom_Dataset(Dataset):
         self.normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         self.image_resize = transforms.Resize((image_size, image_size), interpolation=Image.BILINEAR)
         
-        self.prompt_w = 128
+        self.prompt_w = image_size
 
     def __len__(self):
         return len(self.x)
@@ -51,9 +51,12 @@ class Custom_Dataset(Dataset):
             coord_x, coord_y = random.randint(0, original_width * ratio_w - self.prompt_w - 1 ), random.randint(0, original_height * ratio_h - self.prompt_w -1 )
             # coord_x, coord_y = random.randint(0, original_width - self.prompt_w), random.randint(0, original_height - self.prompt_w)
         
+        coord_x, coord_y = 0,0
+         
         ## define coordinates
         x, y, w = coord_x, coord_y, self.prompt_w 
-        normalized_bbox = [int(x * ratio_w), int(y * ratio_h) , int((x + w) * ratio_w), int((y + w) * ratio_h)]
+        # normalized_bbox = [int(x * ratio_w), int(y * ratio_h) , int((x + w) * ratio_w), int((y + w) * ratio_h)]
+        normalized_bbox = [0, 0 , w, w]
         
         masks = []
         mask = Image.open(self.mask[index]).convert('RGB')
@@ -66,7 +69,7 @@ class Custom_Dataset(Dataset):
 
         bboxes = []
         ## mask preprocessing
-        bboxes.append(normalized_bbox)
+        bboxes.append([0, 0 , self.image_size, self.image_size])
         bboxes = np.stack(bboxes, axis=0)
             
         prompt_imgs = []

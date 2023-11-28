@@ -85,30 +85,30 @@ class PromptEncoder(nn.Module):
         )
         
         ### Box prompt modulated
-        mlp_dim = 2048
-        num_heads= 8
-        attention_downsample_rate= 2
-        self.box_prompt_modulate = TwoWayAttentionBlock(
-            embedding_dim=embed_dim,
-            num_heads=num_heads,
-            mlp_dim=mlp_dim,
-            activation=activation,
-            attention_downsample_rate=attention_downsample_rate,
-            skip_first_layer_pe=False,
-            # skip_first_layer_pe=True,
-        )
+        # mlp_dim = 2048
+        # num_heads= 8
+        # attention_downsample_rate= 2
+        # self.box_prompt_modulate = TwoWayAttentionBlock(
+        #     embedding_dim=embed_dim,
+        #     num_heads=num_heads,
+        #     mlp_dim=mlp_dim,
+        #     activation=activation,
+        #     attention_downsample_rate=attention_downsample_rate,
+        #     skip_first_layer_pe=False,
+        #     # skip_first_layer_pe=True,
+        # )
         
         
-        self.patch_backbone = Backbone('resnet50',
-                    train_backbone=True,
-                    return_layer='layer3',
-                    frozen_bn=False,
-                    dilation=False)
-        self.EPF_extractor = DirectPooling(input_dim=1024, hidden_dim=256)  # pooling used for the query patch feature
+        # self.patch_backbone = Backbone('resnet50',
+        #             train_backbone=True,
+        #             return_layer='layer3',
+        #             frozen_bn=False,
+        #             dilation=False)
+        # self.EPF_extractor = DirectPooling(input_dim=1024, hidden_dim=256)  # pooling used for the query patch feature
         
-        self.matcher = InnerProductMatcher()
+        # self.matcher = InnerProductMatcher()
         self.no_mask_embed = nn.Embedding(1, embed_dim)
-        self.no_imgs_embed = nn.Embedding(1, embed_dim)
+        # self.no_imgs_embed = nn.Embedding(1, embed_dim)
 
     def get_dense_pe(self) -> torch.Tensor:
         """
@@ -141,38 +141,11 @@ class PromptEncoder(nn.Module):
         point_embedding[labels == 1] += self.point_embeddings[1].weight
         return point_embedding
 
-    def _embed_boxes(self, boxes: torch.Tensor, image_features: torch.Tensor, prompt_img_patch: torch.Tensor) -> torch.Tensor:
+    def _embed_boxes(self, boxes: torch.Tensor) -> torch.Tensor:
         """Embeds box prompts."""
         boxes = boxes + 0.5  # Shift to center of pixel
         coords = boxes.reshape(-1, 2, 2)
-        # corner_embedding = self.pe_layer.forward_with_coords(coords, self.input_image_size)
-        
-        prompt_img_patch_feautre = self.patch_backbone(prompt_img_patch)
-        tmp_patch = self.EPF_extractor(prompt_img_patch_feautre) # compress the feature maps into vectors and inject scale embeddings
-        
-        ##                                      256 64 64, num_img 1 256
-        _, corr_map = self.matcher(image_features, tmp_patch)
-        ## 1 3 128 128
-        # print(prompt_img_patch.size())
-        ## 1 1024 8 8
-        # print(prompt_img_patch_feautre.size())
-        # num_img 1 256
-        ### box modulate
-        # image_embedding = image_features.flatten(1).unsqueeze(0).permute(0, 2, 1)
-        image_pe = self.get_dense_pe().flatten(2).permute(0, 2, 1)
-        # 1 256 4096
-        queries = image_features.flatten(1).unsqueeze(0).permute(0, 2, 1)
-        ## 1 4096 1
-        keys = corr_map.repeat(1, 1, 256)
-        
-        queries, keys = self.box_prompt_modulate(
-            queries=queries,
-            keys=keys,
-            query_pe=image_pe,
-            key_pe=image_pe,
-            )
-        corner_embedding = queries
-        #####
+        corner_embedding = self.pe_layer.forward_with_coords(coords, self.input_image_size)
                 
         corner_embedding[:, 0, :] += self.point_embeddings[2].weight
         corner_embedding[:, 1, :] += self.point_embeddings[3].weight
@@ -214,8 +187,6 @@ class PromptEncoder(nn.Module):
         points: Optional[Tuple[torch.Tensor, torch.Tensor]],
         boxes: Optional[torch.Tensor],
         masks: Optional[torch.Tensor],
-        image_features: Optional[torch.Tensor],
-        prompt_img_patch: Optional[torch.Tensor] 
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Embeds different types of prompts, returning both sparse and dense
@@ -241,7 +212,7 @@ class PromptEncoder(nn.Module):
             point_embeddings = self._embed_points(coords, labels, pad=(boxes is None))
             sparse_embeddings = torch.cat([sparse_embeddings, point_embeddings], dim=1)
         if boxes is not None:
-            box_embeddings = self._embed_boxes(boxes, image_features, prompt_img_patch)
+            box_embeddings = self._embed_boxes(boxes)
             sparse_embeddings = torch.cat([sparse_embeddings, box_embeddings], dim=1)
 
         if masks is not None:

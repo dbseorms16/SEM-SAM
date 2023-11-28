@@ -1,4 +1,6 @@
 import os
+os.environ["PL_TORCH_DISTRIBUTED_BACKEND"] = "gloo"
+## if os is window, should change the backendstr in 'distributed_c10d.py' to gloo 
 import argparse
 import sys
 from collections import defaultdict, deque
@@ -31,8 +33,8 @@ sys.path.append("./")
 from SAM import sam_model_registry
 
 NUM_WORKERS = 0  # https://github.com/pytorch/pytorch/issues/42518
-# NUM_GPUS = torch.cuda.device_count()
-NUM_GPUS = 1
+NUM_GPUS = torch.cuda.device_count()
+# NUM_GPUS = 1
 DEVICE = 'cuda'
 
 
@@ -128,41 +130,23 @@ class SAMFinetuner(pl.LightningModule):
             for k, v in self.model.image_encoder.named_parameters():
                 v.requires_grad = False
                 
+                if v.requires_grad == True:
+                    print(f'image encoder - {k} will optimized')
+                
         if freeze_prompt_encoder:
             for k, v in self.model.prompt_encoder.named_parameters():
-                # param.requires_grad = False
-                if 'box_prompt_modulate' in k:
-                    v.requires_grad = True
-                if 'patch_backbone' in k:
-                    v.requires_grad = True
-                if 'EPF_extractor' in k:
-                    v.requires_grad = True
-                if 'matcher' in k:
-                    v.requires_grad = True
-                else:
-                    v.requires_grad = False
-
-        if freeze_mask_decoder:
-            for param in self.model.mask_decoder.parameters():
-                # param.requires_grad = False
-                param.requires_grad = True
-        # if train_VPT_decoder:
-        #     for k, v in self.model.mask_decoder.named_parameters():
-        #         if 'embedding_encoder' in k:
-        #             v.requires_grad = True
-
-        #         if 'compress_vit_feat' in k:
-        #             v.requires_grad = True
-                    
-        #         if 'embedding_maskfeature' in k:
-        #             v.requires_grad = True
-                    
-        #         if 'hf_token' in  k:
-        #             v.requires_grad = True
-                    
-        #         if 'hf_mlp' in  k:
-        #             v.requires_grad = True
+                v.requires_grad = False
                 
+                if v.requires_grad == True:
+                    print(f'prompt encoder - {k} will optimized')
+                    
+        if freeze_mask_decoder:
+            for k, v in self.model.mask_decoder.named_parameters():
+                if 'hf_token' not in k and 'hf_mlp' not in k and 'compress_vit_feat' not in k and 'embedding_encoder' not in k and 'embedding_maskfeature' not in k:
+                    v.requires_grad = True
+
+                if v.requires_grad == True:
+                    print(f'decoder {k} will optimized')
             
         self.batch_size = batch_size
         self.learning_rate = learning_rate
@@ -191,18 +175,11 @@ class SAMFinetuner(pl.LightningModule):
         predictions = []
         tp, fp, fn, tn = [], [], [], []
         for feature, bbox, label, prompt_img, curr_interm in zip(features, bboxes, labels, prompt_imgs, interm_embeddings):
-            # Embed prompts
-            # print(imgs.size())
-            # print(prompt_img.size())
-            # a, b = self.model.image_encoder(prompt_img)
             
             sparse_embeddings, dense_embeddings = self.model.prompt_encoder(
                 points=None,
-                # boxes=bbox,
                 boxes=bbox,
                 masks=None,
-                image_features=feature,
-                prompt_img_patch=prompt_img
             )
             # Predict masks
             low_res_masks, iou_predictions = self.model.mask_decoder(
@@ -212,6 +189,7 @@ class SAMFinetuner(pl.LightningModule):
                 dense_prompt_embeddings=dense_embeddings,
                 multimask_output=False,
                 interm_embeddings = curr_interm.unsqueeze(0).unsqueeze(0),
+                prompt_img=prompt_img
             )
             # Upscale the masks to the original image resolution
             masks = F.interpolate(
@@ -474,8 +452,8 @@ def main():
         ),
     ]
     trainer = pl.Trainer(
-        strategy='ddp_find_unused_parameters_true' if NUM_GPUS > 1 else 'auto',
-        # strategy='ddp' if NUM_GPUS > 1 else None,
+        # strategy='ddp_find_unused_parameters_true' if NUM_GPUS > 1 else 'auto',
+        strategy='ddp' if NUM_GPUS > 1 else None,
         accelerator=DEVICE,
         devices=NUM_GPUS,
         precision=32,
@@ -485,6 +463,7 @@ def main():
         val_check_interval=args.metrics_interval,
         check_val_every_n_epoch=None,
         num_sanity_val_steps=0,
+        log_every_n_steps=37
     )
 
     if args.test_only:
