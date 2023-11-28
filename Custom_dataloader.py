@@ -25,8 +25,6 @@ class Custom_Dataset(Dataset):
         self.normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         self.image_resize = transforms.Resize((image_size, image_size), interpolation=Image.BILINEAR)
         
-        self.prompt_w = image_size
-
     def __len__(self):
         return len(self.x)
 
@@ -43,20 +41,20 @@ class Custom_Dataset(Dataset):
         image = self.normalize(image)
         
         # gray = self.to_tensor(gray)
-        
-        
+                
         if self.phase == 'test':
-            coord_x, coord_y = int(original_width // 2) - (self.prompt_w//2), int(original_height // 2) - (self.prompt_w//2)
+            prompt_w, prompt_h = 128, 128
+            coord_x, coord_y= int(original_width // 2) - (prompt_w//2), int(original_height // 2) - (prompt_h//2)
         else:
-            coord_x, coord_y = random.randint(0, original_width * ratio_w - self.prompt_w - 1 ), random.randint(0, original_height * ratio_h - self.prompt_w -1 )
+            prompt_w, prompt_h = random.randint(60, self.image_size // 4 ), random.randint(60, self.image_size // 4 )
+            coord_x, coord_y = random.randint(0, original_width  - prompt_w), random.randint(0, original_height - prompt_h)
+            
             # coord_x, coord_y = random.randint(0, original_width - self.prompt_w), random.randint(0, original_height - self.prompt_w)
         
-        coord_x, coord_y = 0,0
-         
         ## define coordinates
-        x, y, w = coord_x, coord_y, self.prompt_w 
-        # normalized_bbox = [int(x * ratio_w), int(y * ratio_h) , int((x + w) * ratio_w), int((y + w) * ratio_h)]
-        normalized_bbox = [0, 0 , w, w]
+        
+        normalized_bbox = [int(x * ratio_w), int(y * ratio_h) , int((x + prompt_w) * ratio_w), int((y + prompt_h) * ratio_h)]
+        # normalized_bbox = [0, 0 , w, w]
         
         masks = []
         mask = Image.open(self.mask[index]).convert('RGB')
@@ -67,31 +65,28 @@ class Custom_Dataset(Dataset):
         masks.append(mask)
         masks = np.stack(masks, axis=0)
 
-        bboxes = []
+        entire_bboxes = []
         ## mask preprocessing
-        bboxes.append([0, 0 , self.image_size, self.image_size])
-        bboxes = np.stack(bboxes, axis=0)
+        entire_bboxes.append([0, 0 , self.image_size, self.image_size])
+        entire_bboxes = np.stack(entire_bboxes, axis=0)
             
-        prompt_imgs = []
+        prompt_boxes = []
         ## ancor_image
-        prompt_img = image[:, int(y*ratio_h): int((y+w)*ratio_h), int(x * ratio_w): int((x + w) * ratio_w)]
-        # prompt_img = img[:, int(y): int(y + w), int(x): int(x + w)]
-        
-        prompt_imgs.append(prompt_img)
-        prompt_imgs = torch.stack(prompt_imgs, axis=0)
+        prompt_boxes.append(normalized_bbox)
+        prompt_boxes = np.stack(prompt_boxes, axis=0)
         
         f_name = file_name.split('\\')
         f_name = f_name[2] + '_' + f_name[-1].split('.')[0]
         
         
-        return image, torch.tensor(bboxes), torch.tensor(masks).long(), prompt_imgs, f_name, gt_class
+        return image, torch.tensor(entire_bboxes), torch.tensor(masks).long(), torch.tensor(prompt_boxes), f_name, gt_class
     
     
     @classmethod
     def collate_fn(cls, batch):
-        images, bboxes, masks, prompt_imgs, f_name, gt_class = zip(*batch)
+        images, bboxes, masks, prompt_boxs, f_name, gt_class = zip(*batch)
         images = torch.stack(images, dim=0)
-        return images, bboxes, masks, prompt_imgs, f_name, gt_class
+        return images, bboxes, masks, prompt_boxs, f_name, gt_class
     
     
     def load_dataset_folder(self):

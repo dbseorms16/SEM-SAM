@@ -146,7 +146,7 @@ class SAMFinetuner(pl.LightningModule):
                     v.requires_grad = True
 
                 if v.requires_grad == True:
-                    print(f'decoder {k} will optimized')
+                    print(f'decoder{k} will optimized')
             
         self.batch_size = batch_size
         self.learning_rate = learning_rate
