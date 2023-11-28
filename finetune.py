@@ -140,13 +140,15 @@ class SAMFinetuner(pl.LightningModule):
                 if v.requires_grad == True:
                     print(f'prompt encoder - {k} will optimized')
                     
-        if freeze_mask_decoder:
-            for k, v in self.model.mask_decoder.named_parameters():
-                if 'hf_token' not in k and 'hf_mlp' not in k and 'compress_vit_feat' not in k and 'embedding_encoder' not in k and 'embedding_maskfeature' not in k:
-                    v.requires_grad = True
-
-                if v.requires_grad == True:
-                    print(f'decoder{k} will optimized')
+        for k, v in self.model.mask_decoder.named_parameters():
+            v.requires_grad = False
+            
+            if 'hf_token' in k or 'hf_mlp' in k or 'compress_vit_feat' in k or 'embedding_encoder' in k or 'embedding_maskfeature' in k or 'EPF_extractor' in k:
+                v.requires_grad = True
+                print(f'decoder-{k} will optimized')
+            # else:
+            #     print(f'decoder-{k} will not optimized')
+                
             
         self.batch_size = batch_size
         self.learning_rate = learning_rate
