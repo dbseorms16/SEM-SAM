@@ -52,6 +52,7 @@ class Custom_Dataset(Dataset):
             # coord_x, coord_y = random.randint(0, original_width - self.prompt_w), random.randint(0, original_height - self.prompt_w)
         
         ## define coordinates
+        x, y = coord_x, coord_y
         
         normalized_bbox = [int(x * ratio_w), int(y * ratio_h) , int((x + prompt_w) * ratio_w), int((y + prompt_h) * ratio_h)]
         # normalized_bbox = [0, 0 , w, w]
@@ -79,7 +80,7 @@ class Custom_Dataset(Dataset):
         f_name = f_name[2] + '_' + f_name[-1].split('.')[0]
         
         
-        return image, torch.tensor(entire_bboxes), torch.tensor(masks).long(), torch.tensor(prompt_boxes), f_name, gt_class
+        return image, torch.tensor(entire_bboxes), torch.tensor(masks).long(), prompt_boxes, f_name, gt_class
     
     
     @classmethod

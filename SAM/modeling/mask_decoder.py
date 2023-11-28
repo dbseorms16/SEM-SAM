@@ -11,7 +11,7 @@ from torch.nn import functional as F
 from typing import List, Tuple, Type
 
 from .common import LayerNorm2d
-
+import numpy as np
 
 class MaskDecoder(nn.Module):
     def __init__(
@@ -45,7 +45,7 @@ class MaskDecoder(nn.Module):
         super().__init__()
         self.transformer_dim = transformer_dim
         self.transformer = transformer
-
+        self.vit_dim = vit_dim
         self.num_multimask_outputs = num_multimask_outputs
 
         self.iou_token = nn.Embedding(1, transformer_dim)
@@ -103,7 +103,7 @@ class MaskDecoder(nn.Module):
         dense_prompt_embeddings: torch.Tensor,
         multimask_output: bool,
         interm_embeddings: torch.Tensor,
-        prompt_img: torch.Tensor
+        prompt_box: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Predict masks given image and prompt embeddings.
@@ -122,6 +122,10 @@ class MaskDecoder(nn.Module):
         """
         vit_features = interm_embeddings[0].permute(0, 3, 1, 2) # early-layer ViT feature, after 1st global attention block in ViT
         hq_features = self.embedding_encoder(image_embeddings) + self.compress_vit_feat(vit_features)
+        # torch.Size([1, 1280, 64, 64]
+        normalized_box = np.divide(prompt_box[0], self.vit_dim // image_embeddings.size(3))
+        x, y, w, h = np.around(normalized_box)
+        prompt_img = hq_features.clone()[:, :, int(y) : int(y+h), int(x) : int(x+w)]
         
         masks, iou_pred = self.predict_masks(
             image_embeddings=image_embeddings,
@@ -160,7 +164,9 @@ class MaskDecoder(nn.Module):
         output_tokens = torch.cat([self.iou_token.weight, self.mask_tokens.weight, self.hf_token.weight], dim=0)
         output_tokens = output_tokens.unsqueeze(0).expand(sparse_prompt_embeddings.size(0), -1, -1)
         tokens = torch.cat((output_tokens, sparse_prompt_embeddings), dim=1)
-
+        print('prompt_img', prompt_img.size())
+        print('prompt_img', prompt_img.size())
+        print('prompt_img', prompt_img.size())
         # Expand per-image data in batch direction to be per-mask
         src = torch.repeat_interleave(image_embeddings, tokens.shape[0], dim=0)
         src = src + dense_prompt_embeddings

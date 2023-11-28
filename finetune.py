@@ -164,7 +164,7 @@ class SAMFinetuner(pl.LightningModule):
         self.validation_step_outputs = []
         self.test_step_outputs = []
         
-    def forward(self, imgs, bboxes, labels, prompt_imgs):
+    def forward(self, imgs, bboxes, labels, prompt_boxes):
         _, _, H, W = imgs.shape
         features, interm_embeddings = self.model.image_encoder(imgs)
         interm_embeddings = interm_embeddings[0] # early layer
@@ -174,7 +174,7 @@ class SAMFinetuner(pl.LightningModule):
         loss_focal = loss_dice = loss_iou = 0.
         predictions = []
         tp, fp, fn, tn = [], [], [], []
-        for feature, bbox, label, prompt_img, curr_interm in zip(features, bboxes, labels, prompt_imgs, interm_embeddings):
+        for feature, bbox, label, prompt_box, curr_interm in zip(features, bboxes, labels, prompt_boxes, interm_embeddings):
             
             sparse_embeddings, dense_embeddings = self.model.prompt_encoder(
                 points=None,
@@ -189,7 +189,7 @@ class SAMFinetuner(pl.LightningModule):
                 dense_prompt_embeddings=dense_embeddings,
                 multimask_output=False,
                 interm_embeddings = curr_interm.unsqueeze(0).unsqueeze(0),
-                prompt_img=prompt_img
+                prompt_box=prompt_box
             )
             # Upscale the masks to the original image resolution
             masks = F.interpolate(
@@ -250,8 +250,8 @@ class SAMFinetuner(pl.LightningModule):
         return metrics
     
     def validation_step(self, batch, batch_nb):
-        imgs, bboxes, labels, prompt_imgs, _, _ = batch
-        outputs = self(imgs, bboxes, labels, prompt_imgs)
+        imgs, bboxes, labels, prompt_boxes, _, _ = batch
+        outputs = self(imgs, bboxes, labels, prompt_boxes)
         
         val_average_iou = self.img_mask_save('validation', batch, outputs)
         
@@ -274,8 +274,8 @@ class SAMFinetuner(pl.LightningModule):
         
     
     def test_step(self, batch, batch_nb):
-        imgs, bboxes, labels, prompt_imgs, _, _ = batch
-        outputs = self(imgs, bboxes, labels, prompt_imgs)
+        imgs, bboxes, labels, prompt_boxes, _, _ = batch
+        outputs = self(imgs, bboxes, labels, prompt_boxes)
         
         test_average_iou = self.img_mask_save('test', batch, outputs)
         
@@ -354,11 +354,11 @@ class SAMFinetuner(pl.LightningModule):
 
     def img_mask_save(self, phase, batch, outputs):
         
-        imgs, bboxes, gt_masks, prompt_imgs, f_names, gt_classes= batch
+        imgs, bboxes, gt_masks, prompt_boxes, f_names, gt_classes= batch
         
         pred_masks = outputs['predictions']
         total_iou = 0
-        for i, (img, gt_mask, pred_mask, box, prompt_img, f_name, gt_class) in enumerate(zip(imgs, gt_masks, pred_masks, bboxes, prompt_imgs, f_names, gt_classes)):
+        for i, (img, gt_mask, pred_mask, box, prompt_box, f_name, gt_class) in enumerate(zip(imgs, gt_masks, pred_masks, bboxes, prompt_boxes, f_names, gt_classes)):
             img = img.permute(1,2,0).detach().cpu().numpy()
             img = DeNormalize(img).astype(int)
             
@@ -370,7 +370,7 @@ class SAMFinetuner(pl.LightningModule):
             show_mask(pred_mask, plt.gca(), gt_class)
 
             iou, f_score, precision, recall = calculate_metrics(pred_mask, gt_mask)
-            show_box(box.detach().cpu().numpy(), plt.gca())
+            show_box(prompt_box, plt.gca())
             
             total_iou += iou
             plt.title(f"Mask {i+1}, IOU: {iou:.3f}, F-score: {f_score:.3f}, precision: {precision:.3f}, recall: {recall:.3f}", fontsize=12)
@@ -386,7 +386,7 @@ class SAMFinetuner(pl.LightningModule):
             plt.axis('off')
             ## gt_mask save
             show_mask(gt_mask, plt.gca(), gt_class)
-            show_box(box.detach().cpu().numpy(), plt.gca())
+            show_box(prompt_box, plt.gca())
             
             filename = f"{f_name}_gt.png"
             plt.savefig(os.path.join(self.save_base, phase, filename), bbox_inches='tight', pad_inches=0)
