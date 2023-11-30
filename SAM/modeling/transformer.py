@@ -109,7 +109,7 @@ class TwoWayTransformer(nn.Module):
         queries = queries + attn_out
         queries = self.norm_final_attn(queries)
 
-        feature = keys.permute(0, 2, 1).view(1, 256, 64, 64)
+        # feature = keys.permute(0, 2, 1).view(1, 256, 64, 64)
         
         # for a in range(256):
         #     save_plt(feature[0, a], 'att_a'+ str(a))

@@ -1,5 +1,5 @@
 python finetune.py \
-    --data_root ./dataset \
+    --data_root ./cus_dataset \
     --model_type vit_h \
     --checkpoint_path ./checkpoints/sam_vit_h_4b8939.pth \
     --freeze_image_encoder \

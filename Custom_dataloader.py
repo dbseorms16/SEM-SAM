@@ -68,7 +68,8 @@ class Custom_Dataset(Dataset):
 
         entire_bboxes = []
         ## mask preprocessing
-        entire_bboxes.append([0, 0 , self.image_size, self.image_size])
+        # entire_bboxes.append([0, 0 , self.image_size, self.image_size])
+        entire_bboxes.append(normalized_bbox)
         entire_bboxes = np.stack(entire_bboxes, axis=0)
             
         prompt_boxes = []

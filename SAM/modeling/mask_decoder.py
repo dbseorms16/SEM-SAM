@@ -163,32 +163,44 @@ class MaskDecoder(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Predicts masks. See 'forward' for more details."""
         # Concatenate output tokens
-        output_tokens = torch.cat([self.iou_token.weight, self.mask_tokens.weight, self.hf_token.weight], dim=0)
-        output_tokens = output_tokens.unsqueeze(0).expand(sparse_prompt_embeddings.size(0), -1, -1)
-        tokens = torch.cat((output_tokens, sparse_prompt_embeddings), dim=1)
+        # 1 1 256
+        # self.hf_token.weight
         
         # 1 32 ? ?
         tmp_patch = self.EPF_extractor(prompt_img_feature) # compress the feature maps into vectors and inject scale embeddings
         # torch.Size([1, 32, ?, ?]) torch.Size([1, 256, 64, 64]) torch.Size([1, 1, 256])
         _, corr_map = self.matcher(image_embeddings, tmp_patch)
+        hq_token = self.hf_token.weight + corr_map
+        # output_tokens = torch.cat([self.iou_token.weight, self.mask_tokens.weight, self.hf_token.weight], dim=0)
+        output_tokens = torch.cat([self.iou_token.weight, self.mask_tokens.weight, hq_token], dim=0)
+        output_tokens = output_tokens.unsqueeze(0).expand(sparse_prompt_embeddings.size(0), -1, -1)
+        tokens = torch.cat((output_tokens, sparse_prompt_embeddings), dim=1)
+        
         
         # Expand per-image data in batch direction to be per-mask
         src = torch.repeat_interleave(image_embeddings, tokens.shape[0], dim=0)
         src = src + dense_prompt_embeddings
         ## add coor_map
-        src = src + corr_map
+        # src = src + corr_map
         pos_src = torch.repeat_interleave(image_pe, tokens.shape[0], dim=0)
         b, c, h, w = src.shape
 
         # Run the transformer
         hs, src = self.transformer(src, pos_src, tokens)
+        # hs size = 1 8 256
         iou_token_out = hs[:, 0, :]
+        
+        # 기존 4 + hq + 1 mask_tokens_out = 1 5 256
         mask_tokens_out = hs[:, 1 : (1 + self.num_mask_tokens), :]
-
         # Upscale mask embeddings and predict masks using the mask tokens
         src = src.transpose(1, 2).view(b, c, h, w)
 
+        # src.size() torch.Size([1, 256, 64, 64])
         upscaled_embedding_sam = self.output_upscaling(src)
+        # torch.Size([1, 32, 256, 256]) torch.Size([1, 32, 256, 256])
+        # print(upscaled_embedding_sam.size(), hq_features.size())
+        
+        # self.embedding_maskfeature = 피쳐양 줄였다가 늘리면서 hq_feature랑 매칭?
         upscaled_embedding_hq = self.embedding_maskfeature(upscaled_embedding_sam) + hq_features.repeat(b,1,1,1)
 
         hyper_in_list: List[torch.Tensor] = []
