@@ -71,7 +71,7 @@ class MaskDecoder(nn.Module):
         )
         
         # HQ-SAM parameters
-        self.hf_token = nn.Embedding(1, transformer_dim) # HQ-Ouptput-Token
+        # self.hf_token = nn.Embedding(1, transformer_dim) # HQ-Ouptput-Token
         self.hf_mlp = MLP(transformer_dim, transformer_dim, transformer_dim // 8, 3) # corresponding new MLP layer for HQ-Ouptput-Token
         self.num_mask_tokens = self.num_mask_tokens + 1
         
@@ -95,6 +95,8 @@ class MaskDecoder(nn.Module):
                                         nn.Conv2d(transformer_dim // 4, transformer_dim // 8, 3, 1, 1))
         self.EPF_extractor = DirectPooling(input_dim=32, hidden_dim=256)  # pooling used for the query patch feature
         self.matcher = InnerProductMatcher()
+        self.feature_align = nn.Linear(4096, 256) # align the patch feature dim to query patch dim.
+        
         
 
     def forward(
@@ -169,8 +171,14 @@ class MaskDecoder(nn.Module):
         # 1 32 ? ?
         tmp_patch = self.EPF_extractor(prompt_img_feature) # compress the feature maps into vectors and inject scale embeddings
         # torch.Size([1, 32, ?, ?]) torch.Size([1, 256, 64, 64]) torch.Size([1, 1, 256])
+        
         _, corr_map = self.matcher(image_embeddings, tmp_patch)
-        hq_token = self.hf_token.weight + corr_map
+        corr_map = corr_map.squeeze(-1)
+        hq_token = self.feature_align(corr_map)
+        # torch.Size([1, 4096, 1])
+        # torch.Size([1, 64, 64])
+        
+        # hq_token = self.hf_token.weight + corr_map.squeeze(-1)
         # output_tokens = torch.cat([self.iou_token.weight, self.mask_tokens.weight, self.hf_token.weight], dim=0)
         output_tokens = torch.cat([self.iou_token.weight, self.mask_tokens.weight, hq_token], dim=0)
         output_tokens = output_tokens.unsqueeze(0).expand(sparse_prompt_embeddings.size(0), -1, -1)
@@ -368,4 +376,4 @@ class InnerProductMatcher(nn.Module):
             corr = energy.max(dim=-1, keepdim=True)[0]
         out = torch.cat((features, corr), dim=-1) # bs * hw * dim
 
-        return out.permute(0, 2, 1).view(bs, c+1, h, w), energy.permute(0, 2, 1).view(bs, 1, h, w)
+        return out.permute(0, 2, 1).view(bs, c+1, h, w), energy
