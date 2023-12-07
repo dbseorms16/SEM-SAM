@@ -42,9 +42,11 @@ class Custom_Dataset(Dataset):
         
         # gray = self.to_tensor(gray)
                 
-        prompt_w, prompt_h = 32, 32
+        # prompt_w, prompt_h = 32, 32
+        # prompt_w, prompt_h = 32, 32
                 
         if self.phase == 'test':
+            prompt_w, prompt_h = random.randint(60, self.image_size // 4 ), random.randint(60, self.image_size // 4 )
             coord_x, coord_y= int(original_width // 2) - (prompt_w//2), int(original_height // 2) - (prompt_h//2)
         else:
             prompt_w, prompt_h = random.randint(60, self.image_size // 4 ), random.randint(60, self.image_size // 4 )
@@ -55,6 +57,7 @@ class Custom_Dataset(Dataset):
         ## define coordinates
         x, y = coord_x, coord_y
         
+        # normalized_bbox = [int(x * ratio_w), int(y * ratio_h) , int((x + prompt_w) * ratio_w), int((y + prompt_h) * ratio_h)]
         normalized_bbox = [int(x * ratio_w), int(y * ratio_h) , int((x + prompt_w) * ratio_w), int((y + prompt_h) * ratio_h)]
         # normalized_bbox = [0, 0 , w, w]
         

@@ -93,11 +93,32 @@ class MaskDecoder(nn.Module):
                                         LayerNorm2d(transformer_dim // 4),
                                         nn.GELU(),
                                         nn.Conv2d(transformer_dim // 4, transformer_dim // 8, 3, 1, 1))
-        self.EPF_extractor = DirectPooling(input_dim=32, hidden_dim=256)  # pooling used for the query patch feature
-        self.matcher = InnerProductMatcher()
-        self.feature_align = nn.Linear(4096, 256) # align the patch feature dim to query patch dim.
+        # self.EPF_extractor = DirectPooling(input_dim=32, hidden_dim=256)  # pooling used for the query patch feature
+        # self.matcher = InnerProductMatcher()
         
+        embed_dim = 32
+        mid_dim = 1024
+        head= 8
+        dropout = 0.0
+        self.aggt = SimilarityWeightedAggregation(embed_dim=embed_dim, head=head, dropout=dropout)
+        self.conv1 = nn.Conv2d(embed_dim, mid_dim, kernel_size=3, stride=1, padding=1)
+        self.dropout = nn.Dropout(dropout)
+        self.conv2 = nn.Conv2d(mid_dim, embed_dim, kernel_size=3, stride=1, padding=1)
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+        self.activation = nn.LeakyReLU()
+        self.feature_align = nn.Linear(32, 256) # align the patch feature dim to query patch dim.
         
+        # safecount_block = SAFECountBlock(
+        #     embed_dim=embed_dim,
+        #     mid_dim=mid_dim,
+        #     head=head,
+        #     dropout=dropout,
+        #     activation=activation,
+        # )
+
 
     def forward(
         self,
@@ -164,19 +185,20 @@ class MaskDecoder(nn.Module):
         prompt_img_feature: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Predicts masks. See 'forward' for more details."""
-        # Concatenate output tokens
-        # 1 1 256
-        # self.hf_token.weight
+
+        tgt = prompt_img_feature
+        tgt2 = self.aggt(query=tgt, keys=hq_features, values=hq_features)
+        tgt = tgt + self.dropout1(tgt2)
+        tgt = tgt.permute(0, 2, 3, 1).contiguous()
+        tgt = self.norm1(tgt).permute(0, 3, 1, 2).contiguous()
+        tgt2 = self.conv2(self.dropout(self.activation(self.conv1(tgt))))
+        tgt = tgt + self.dropout2(tgt2)
+        tgt = tgt.permute(0, 2, 3, 1).contiguous()
+        tgt = self.norm2(tgt).permute(0, 3, 1, 2).contiguous()
+
+        tgt = F.adaptive_max_pool2d(tgt, [1,1], return_indices=False).squeeze(-1).squeeze(-1)
+        hq_token = self.feature_align(tgt)
         
-        # 1 32 ? ?
-        tmp_patch = self.EPF_extractor(prompt_img_feature) # compress the feature maps into vectors and inject scale embeddings
-        # torch.Size([1, 32, ?, ?]) torch.Size([1, 256, 64, 64]) torch.Size([1, 1, 256])
-        
-        _, corr_map = self.matcher(image_embeddings, tmp_patch)
-        corr_map = corr_map.squeeze(-1)
-        hq_token = self.feature_align(corr_map)
-        # torch.Size([1, 4096, 1])
-        # torch.Size([1, 64, 64])
         
         # hq_token = self.hf_token.weight + corr_map.squeeze(-1)
         # output_tokens = torch.cat([self.iou_token.weight, self.mask_tokens.weight, self.hf_token.weight], dim=0)
@@ -365,15 +387,108 @@ class InnerProductMatcher(nn.Module):
         self.pool = pool
     
     def forward(self, features, patches_feat):
-        # torch.Size([1, 256, 64, 64]) torch.Size([1, 1, 256])
-        bs, c, h, w = features.shape
         features = features.flatten(2).permute(0, 2, 1)  # bs * hw * c
         patches_feat = patches_feat.permute(1, 2, 0)      # bs * c * exemplar_number
         energy = torch.bmm(features, patches_feat)       # bs * hw * exemplar_number
-        if self.pool == 'mean':
-            corr = energy.mean(dim=-1, keepdim=True)
-        elif self.pool == 'max':
-            corr = energy.max(dim=-1, keepdim=True)[0]
-        out = torch.cat((features, corr), dim=-1) # bs * hw * dim
 
-        return out.permute(0, 2, 1).view(bs, c+1, h, w), energy
+        return energy
+
+
+
+class SimilarityWeightedAggregation(nn.Module):
+    """
+    Implement the multi-head attention with convolution to keep the spatial structure.
+    """
+
+    def __init__(self, embed_dim, head, dropout):
+        super().__init__()
+        self.pool = "max"
+        self.pool_size = [1,1]
+        self.embed_dim = embed_dim
+        self.head = head
+        self.dropout = nn.Dropout(dropout)
+        self.head_dim = embed_dim // head
+        assert self.head_dim * head == self.embed_dim
+        self.norm = nn.LayerNorm(embed_dim)
+        self.in_conv = nn.Conv2d(embed_dim, embed_dim, kernel_size=1, stride=1)
+        self.out_conv = nn.Conv2d(embed_dim, embed_dim, kernel_size=1, stride=1)
+
+    def forward(self, query, keys, values):
+        """
+        query: 1 x C x H x W
+        keys: list of 1 x C x H x W
+        values: list of 1 x C x H x W
+        """
+        h_p, w_p = self.pool_size
+        pad = (w_p // 2, w_p // 2, h_p // 2, h_p // 2)
+        _, _, h_q, w_q = query.size()
+
+        ##################################################################################
+        # calculate similarity (attention)
+        ##################################################################################
+        query = self.in_conv(query)
+        query = query.permute(0, 2, 3, 1).contiguous()
+        query = self.norm(query).permute(0, 3, 1, 2).contiguous()
+        query = query.contiguous().view(
+            self.head, self.head_dim, h_q, w_q
+        )  # [head,c,h,w]
+        attns_list = []
+        key = keys
+        if self.pool == "max":
+            key = F.adaptive_max_pool2d(key, self.pool_size, return_indices=False)
+        else:
+            key = F.adaptive_avg_pool2d(key, self.pool_size)
+        key = self.in_conv(key)
+        key = key.permute(0, 2, 3, 1).contiguous()
+        key = self.norm(key).permute(0, 3, 1, 2).contiguous()
+        key = key.contiguous().view(
+            self.head, self.head_dim, h_p, w_p
+        )  # [head,c,h,w]
+        attn_list = []
+        for q, k in zip(query, key):
+            attn = F.conv2d(F.pad(q.unsqueeze(0), pad), k.unsqueeze(0))  # [1,1,h,w]
+            attn_list.append(attn)
+        attn = torch.cat(attn_list, dim=0)  # [head,1,h,w]
+        attns_list.append(attn)
+        attns = torch.cat(attns_list, dim=1)  # [head,n,h,w]
+        assert list(attns.size()) == [self.head, len(keys), h_q, w_q]
+
+        ##################################################################################
+        # score normalization
+        ##################################################################################
+        attns = attns * float(self.embed_dim * h_p * w_p) ** -0.5  # scaling
+        attns = torch.exp(attns)  # [head,n,h,w]
+        attns_sn = (
+            attns / (attns.max(dim=2, keepdim=True)[0]).max(dim=3, keepdim=True)[0]
+        )
+        attns_en = attns / attns.sum(dim=1, keepdim=True)
+        attns = self.dropout(attns_sn * attns_en)
+
+        ##################################################################################
+        # similarity weighted aggregation
+        ##################################################################################
+        feats = 0
+        for idx, value in enumerate(values):
+            if self.pool == "max":
+                value = F.adaptive_max_pool2d(
+                    value, self.pool_size, return_indices=False
+                )
+            else:
+                value = F.adaptive_avg_pool2d(value, self.pool_size)
+            attn = attns[:, idx, :, :].unsqueeze(1)  # [head,1,h,w]
+            value = self.in_conv(value)
+            value = value.contiguous().view(
+                self.head, self.head_dim, h_p, w_p
+            )  # [head,c,h,w]
+            feat_list = []
+            for w, v in zip(attn, value):
+                feat = F.conv2d(
+                    F.pad(w.unsqueeze(0), pad), v.unsqueeze(1).flip(2, 3)
+                )  # [1,c,h,w]
+                feat_list.append(feat)
+            feat = torch.cat(feat_list, dim=0)  # [head,c,h,w]
+            feats += feat
+        assert list(feats.size()) == [self.head, self.head_dim, h_q, w_q]
+        feats = feats.contiguous().view(1, self.embed_dim, h_q, w_q)  # [1,c,h,w]
+        feats = self.out_conv(feats)
+        return feats
