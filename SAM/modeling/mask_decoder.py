@@ -12,6 +12,7 @@ from typing import List, Tuple, Type
 
 from .common import LayerNorm2d
 import numpy as np
+from einops import rearrange, reduce
 
 class MaskDecoder(nn.Module):
     def __init__(
@@ -93,23 +94,24 @@ class MaskDecoder(nn.Module):
                                         LayerNorm2d(transformer_dim // 4),
                                         nn.GELU(),
                                         nn.Conv2d(transformer_dim // 4, transformer_dim // 8, 3, 1, 1))
-        # self.EPF_extractor = DirectPooling(input_dim=32, hidden_dim=256)  # pooling used for the query patch feature
-        # self.matcher = InnerProductMatcher()
         
-        embed_dim = 32
-        mid_dim = 1024
-        head= 8
-        dropout = 0.0
-        self.aggt = SimilarityWeightedAggregation(embed_dim=embed_dim, head=head, dropout=dropout)
-        self.conv1 = nn.Conv2d(embed_dim, mid_dim, kernel_size=3, stride=1, padding=1)
-        self.dropout = nn.Dropout(dropout)
-        self.conv2 = nn.Conv2d(mid_dim, embed_dim, kernel_size=3, stride=1, padding=1)
-        self.norm1 = nn.LayerNorm(embed_dim)
-        self.norm2 = nn.LayerNorm(embed_dim)
-        self.dropout1 = nn.Dropout(dropout)
-        self.dropout2 = nn.Dropout(dropout)
-        self.activation = nn.LeakyReLU()
-        self.feature_align = nn.Linear(32, 256) # align the patch feature dim to query patch dim.
+        self.EPF_extractor = DirectPooling(input_dim=32, hidden_dim=256)  # pooling used for the query patch feature
+        self.feature_align = nn.Linear(4096, 256) # align the patch feature dim to query patch dim.
+        self.matcher = InnerProductMatcher()
+        
+        # embed_dim = 32
+        # mid_dim = 1024
+        # head= 8
+        # dropout = 0.0
+        # self.aggt = SimilarityWeightedAggregation(embed_dim=embed_dim, head=head, dropout=dropout)
+        # self.conv1 = nn.Conv2d(embed_dim, mid_dim, kernel_size=3, stride=1, padding=1)
+        # self.dropout = nn.Dropout(dropout)
+        # self.conv2 = nn.Conv2d(mid_dim, embed_dim, kernel_size=3, stride=1, padding=1)
+        # self.norm1 = nn.LayerNorm(embed_dim)
+        # self.norm2 = nn.LayerNorm(embed_dim)
+        # self.dropout1 = nn.Dropout(dropout)
+        # self.dropout2 = nn.Dropout(dropout)
+        # self.activation = nn.LeakyReLU()
         
         # safecount_block = SAFECountBlock(
         #     embed_dim=embed_dim,
@@ -145,7 +147,7 @@ class MaskDecoder(nn.Module):
           torch.Tensor: batched predicted masks
           torch.Tensor: batched predictions of mask quality
         """
-        vit_features = interm_embeddings[0].permute(0, 3, 1, 2) # early-layer ViT feature, after 1st global attention block in ViT
+        vit_features = interm_embeddings[0].permute(0, 3, 1, 2).contiguous() # early-layer ViT feature, after 1st global attention block in ViT
         hq_features = self.embedding_encoder(image_embeddings) + self.compress_vit_feat(vit_features)
         # torch.Size([1, 1280, 64, 64]
         normalized_box = np.divide(prompt_box[0], self.vit_dim // image_embeddings.size(3))
@@ -186,23 +188,33 @@ class MaskDecoder(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Predicts masks. See 'forward' for more details."""
 
-        tgt = prompt_img_feature
-        tgt2 = self.aggt(query=tgt, keys=hq_features, values=hq_features)
-        tgt = tgt + self.dropout1(tgt2)
-        tgt = tgt.permute(0, 2, 3, 1).contiguous()
-        tgt = self.norm1(tgt).permute(0, 3, 1, 2).contiguous()
-        tgt2 = self.conv2(self.dropout(self.activation(self.conv1(tgt))))
-        tgt = tgt + self.dropout2(tgt2)
-        tgt = tgt.permute(0, 2, 3, 1).contiguous()
-        tgt = self.norm2(tgt).permute(0, 3, 1, 2).contiguous()
-
-        tgt = F.adaptive_max_pool2d(tgt, [1,1], return_indices=False).squeeze(-1).squeeze(-1)
-        hq_token = self.feature_align(tgt)
+        # tgt = prompt_img_feature.contiguous()
+        # tgt2 = self.aggt(query=tgt, keys=hq_features, values=hq_features).contiguous()
+        # tgt = tgt + self.dropout1(tgt2).contiguous()
+        # tgt = tgt.permute(0, 2, 3, 1).contiguous()
+        # tgt = self.norm1(tgt).permute(0, 3, 1, 2).contiguous()
+        # tgt2 = self.conv2(self.dropout(self.activation(self.conv1(tgt)))).contiguous()
+        # tgt = tgt + self.dropout2(tgt2).contiguous()
+        # tgt = tgt.permute(0, 2, 3, 1).contiguous()
+        # tgt = self.norm2(tgt).permute(0, 3, 1, 2).contiguous()
+        # # tgt = F.adaptive_max_pool2d(tgt, [1,1], return_indices=False)
+        # tgt = reduce(tgt, 'b c h w -> b c', 'max').contiguous()
+        # hq_token = self.feature_align(tgt).contiguous()
+        augmented_prompt_imgs = [prompt_img_feature, 
+                                torch.fliplr(prompt_img_feature),
+                                torch.flipud(prompt_img_feature),
+                                torch.rot90(prompt_img_feature, 1, [2,3])] 
         
+        hq_tokens = []
+        for prompt_img_feature in augmented_prompt_imgs:
+            tmp_patch = self.EPF_extractor(prompt_img_feature) # compress the feature maps into vectors and inject scale embeddings
+            corr_map = self.matcher(image_embeddings, tmp_patch)
+            corr_map = corr_map.squeeze(-1)
+            hq_token = self.feature_align(corr_map)
+            hq_tokens.append(hq_token)
+        hq_tokens = torch.cat(hq_tokens, dim=0) 
         
-        # hq_token = self.hf_token.weight + corr_map.squeeze(-1)
-        # output_tokens = torch.cat([self.iou_token.weight, self.mask_tokens.weight, self.hf_token.weight], dim=0)
-        output_tokens = torch.cat([self.iou_token.weight, self.mask_tokens.weight, hq_token], dim=0)
+        output_tokens = torch.cat([self.iou_token.weight, self.mask_tokens.weight, hq_tokens], dim=0)
         output_tokens = output_tokens.unsqueeze(0).expand(sparse_prompt_embeddings.size(0), -1, -1)
         tokens = torch.cat((output_tokens, sparse_prompt_embeddings), dim=1)
         
@@ -223,7 +235,7 @@ class MaskDecoder(nn.Module):
         # 기존 4 + hq + 1 mask_tokens_out = 1 5 256
         mask_tokens_out = hs[:, 1 : (1 + self.num_mask_tokens), :]
         # Upscale mask embeddings and predict masks using the mask tokens
-        src = src.transpose(1, 2).view(b, c, h, w)
+        src = src.transpose(1, 2).view(b, c, h, w).contiguous()
 
         # src.size() torch.Size([1, 256, 64, 64])
         upscaled_embedding_sam = self.output_upscaling(src)
@@ -346,13 +358,13 @@ class DynamicSimilarityMatcher(nn.Module):
             
     def forward(self, features, patches):
         bs, c, h, w = features.shape
-        features = features.flatten(2).permute(2, 0, 1)  # hw * bs * dim
+        features = features.flatten(2).permute(2, 0, 1).contiguous()  # hw * bs * dim
         
         proj_feat = self.query_conv(features)
         patches_feat = self.key_conv(patches)
         patches_ca = self.activation(self.dynamic_pattern_conv(patches_feat))
         
-        proj_feat = proj_feat.permute(1, 0, 2)
+        proj_feat = proj_feat.permute(1, 0, 2).contiguous()
         patches_feat = (patches_feat * (patches_ca + 1)).permute(1, 2, 0)  # bs * c * exemplar_number        
         energy = torch.bmm(proj_feat, patches_feat)                        # bs * hw * exemplar_number
 

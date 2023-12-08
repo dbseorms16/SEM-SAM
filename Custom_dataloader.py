@@ -43,13 +43,13 @@ class Custom_Dataset(Dataset):
         # gray = self.to_tensor(gray)
                 
         # prompt_w, prompt_h = 32, 32
-        # prompt_w, prompt_h = 32, 32
+        prompt_w, prompt_h = 32, 32
                 
         if self.phase == 'test':
-            prompt_w, prompt_h = random.randint(60, self.image_size // 4 ), random.randint(60, self.image_size // 4 )
+            # prompt_w, prompt_h = random.randint(60, self.image_size // 4 ), random.randint(60, self.image_size // 4 )
             coord_x, coord_y= int(original_width // 2) - (prompt_w//2), int(original_height // 2) - (prompt_h//2)
         else:
-            prompt_w, prompt_h = random.randint(60, self.image_size // 4 ), random.randint(60, self.image_size // 4 )
+            # prompt_w, prompt_h = random.randint(60, self.image_size // 4 ), random.randint(60, self.image_size // 4 )
             coord_x, coord_y = random.randint(0, original_width  - prompt_w), random.randint(0, original_height - prompt_h)
             
             # coord_x, coord_y = random.randint(0, original_width - self.prompt_w), random.randint(0, original_height - self.prompt_w)
