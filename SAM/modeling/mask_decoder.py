@@ -75,7 +75,9 @@ class MaskDecoder(nn.Module):
         # self.hf_token = nn.Embedding(1, transformer_dim) # HQ-Ouptput-Token
         self.hf_mlp = MLP(transformer_dim, transformer_dim, transformer_dim // 8, 3) # corresponding new MLP layer for HQ-Ouptput-Token
         # self.num_mask_tokens = self.num_mask_tokens + 1
-        self.num_mask_tokens = self.num_mask_tokens + 4
+        
+        self.additional_token = 5
+        self.num_mask_tokens = self.num_mask_tokens + self.additional_token
         
         # three conv fusion layers for obtaining HQ-Feature
         self.compress_vit_feat = nn.Sequential(
@@ -154,6 +156,7 @@ class MaskDecoder(nn.Module):
         normalized_box = np.divide(prompt_box[0], self.vit_dim // image_embeddings.size(3))
         x, y, w, h = np.around(normalized_box)
         prompt_img_feature = hq_features.clone()[:, :, int(y) : int(y+h), int(x) : int(x+w)]
+        prompt_img_feature_x2 = hq_features.clone()[:, :, int(y) : int(y+h*2), int(x) : int(x+w*2)]
         
         masks, iou_pred = self.predict_masks(
             image_embeddings=image_embeddings,
@@ -161,7 +164,8 @@ class MaskDecoder(nn.Module):
             sparse_prompt_embeddings=sparse_prompt_embeddings,
             dense_prompt_embeddings=dense_prompt_embeddings,
             hq_features=hq_features,
-            prompt_img_feature=prompt_img_feature
+            prompt_img_feature=prompt_img_feature,
+            prompt_img_feature_x2=prompt_img_feature_x2
         )
 
         # Select the correct mask or masks for output
@@ -185,7 +189,8 @@ class MaskDecoder(nn.Module):
         sparse_prompt_embeddings: torch.Tensor,
         dense_prompt_embeddings: torch.Tensor,
         hq_features: torch.Tensor,
-        prompt_img_feature: torch.Tensor
+        prompt_img_feature: torch.Tensor,
+        prompt_img_feature_x2: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Predicts masks. See 'forward' for more details."""
 
@@ -201,7 +206,12 @@ class MaskDecoder(nn.Module):
         # # tgt = F.adaptive_max_pool2d(tgt, [1,1], return_indices=False)
         # tgt = reduce(tgt, 'b c h w -> b c', 'max').contiguous()
         # hq_token = self.feature_align(tgt).contiguous()
+        
+        # corr_map = self.matcher(image_embeddings, tmp_patch)
+        
+        
         augmented_prompt_imgs = [prompt_img_feature, 
+                                prompt_img_feature_x2,
                                 torch.fliplr(prompt_img_feature),
                                 torch.flipud(prompt_img_feature),
                                 torch.rot90(prompt_img_feature, 1, [2,3])] 
@@ -248,7 +258,7 @@ class MaskDecoder(nn.Module):
 
         hyper_in_list: List[torch.Tensor] = []
         for i in range(self.num_mask_tokens):
-            if i < self.num_mask_tokens - 4:
+            if i < self.num_mask_tokens - self.additional_token:
                 hyper_in_list.append(self.output_hypernetworks_mlps[i](mask_tokens_out[:, i, :]))
             else:
                 hyper_in_list.append(self.hf_mlp(mask_tokens_out[:, i, :]))
@@ -256,8 +266,8 @@ class MaskDecoder(nn.Module):
         hyper_in = torch.stack(hyper_in_list, dim=1)
         b, c, h, w = upscaled_embedding_sam.shape
 
-        masks_sam = (hyper_in[:,:self.num_mask_tokens-4] @ upscaled_embedding_sam.view(b, c, h * w)).view(b, -1, h, w)
-        masks_sam_hq = (hyper_in[:,self.num_mask_tokens-4:] @ upscaled_embedding_hq.view(b, c, h * w)).view(b, -1, h, w)
+        masks_sam = (hyper_in[:,:self.num_mask_tokens - self.additional_token] @ upscaled_embedding_sam.view(b, c, h * w)).view(b, -1, h, w)
+        masks_sam_hq = (hyper_in[:,self.num_mask_tokens - self.additional_token:] @ upscaled_embedding_hq.view(b, c, h * w)).view(b, -1, h, w)
         masks = torch.cat([masks_sam,masks_sam_hq],dim=1)
         # Generate mask quality predictions
         iou_pred = self.iou_prediction_head(iou_token_out)

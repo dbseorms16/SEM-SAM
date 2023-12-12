@@ -373,7 +373,6 @@ class SAMFinetuner(pl.LightningModule):
 
             iou, f_score, precision, recall = calculate_metrics(pred_mask, gt_mask)
             show_box(prompt_box, plt.gca())
-            
             total_iou += iou
             plt.title(f"Mask {i+1}, IOU: {iou:.3f}, F-score: {f_score:.3f}, precision: {precision:.3f}, recall: {recall:.3f}", fontsize=12)
             plt.axis('off')

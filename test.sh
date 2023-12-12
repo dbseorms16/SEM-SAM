@@ -1,7 +1,7 @@
 python finetune.py \
     --data_root ./cus_dataset \
     --model_type vit_h \
-    --checkpoint_path ./checkpoints/last-v1.ckpt \
+    --checkpoint_path ./checkpoints/last-v5.ckpt \
     --freeze_image_encoder \
     --freeze_mask_decoder \
     --freeze_prompt_encoder \
