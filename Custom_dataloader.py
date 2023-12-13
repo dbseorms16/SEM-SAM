@@ -42,8 +42,7 @@ class Custom_Dataset(Dataset):
         
         # gray = self.to_tensor(gray)
                 
-        # prompt_w, prompt_h = 32, 32
-        prompt_w, prompt_h = 64, 64
+        prompt_w, prompt_h = 32, 32
                 
         if self.phase == 'test':
             # prompt_w, prompt_h = random.randint(60, self.image_size // 4 ), random.randint(60, self.image_size // 4 )
