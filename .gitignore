@@ -9,3 +9,8 @@
 *.gitconfig
 .cache/*
 lightning_logs/*
+*.zip
+*.ckpt
+.DS_Store
+*.jpeg
+*.pdf
