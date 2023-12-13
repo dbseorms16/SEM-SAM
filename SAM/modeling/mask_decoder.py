@@ -185,6 +185,12 @@ class MaskDecoder(nn.Module):
         iou_pred = iou_pred[:, mask_slice]
 
         masks_hq = masks[:,slice(self.num_mask_tokens-1, self.num_mask_tokens)]
+
+        # Adddion augmented masks
+        for i in range(self.num_mask_tokens + self.num_hq_token, self.total_num_mask_tokens+1):
+            masks_hq += masks[:, slice(i-1, i)]
+
+        # print(masks_sam.shape, masks_hq.shape)
         masks = masks_sam + masks_hq
 
         # Prepare output

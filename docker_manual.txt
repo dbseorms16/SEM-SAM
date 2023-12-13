@@ -1,3 +1,3 @@
 docker build -t yjs:0.1 ./
-
+watch -d -n 0.5 nvidia-smi
 sudo docker run -d -it --name torch2.0 --gpus all --ipc=host -v /home/aims/Desktop/JunSeok/SEM-SAM:/root -p 8880:8880 yjs:0.3
