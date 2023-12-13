@@ -64,23 +64,31 @@ class MaskDecoder(nn.Module):
         self.iou_prediction_head = MLP(
             transformer_dim, iou_head_hidden_dim, self.num_mask_tokens, iou_head_depth
         )
-        
-        # HQ-SAM parameters
-        self.hf_token = nn.Embedding(1, transformer_dim) # HQ-Ouptput-Token
 
-        self.hf_mlp = MLP(transformer_dim, transformer_dim, transformer_dim // 8, 3) # corresponding new MLP layer for HQ-Ouptput-Token
-        # self.num_mask_tokens = self.num_mask_tokens + 1
-        
-        self.num_hq_token = 1
-        self.additional_token = 4
-        self.total_num_mask_tokens = self.num_mask_tokens + self.num_hq_token + self.additional_token
-        
         self.output_hypernetworks_mlps = nn.ModuleList(
             [
                 MLP(transformer_dim, transformer_dim, transformer_dim // 8, 3)
                 for i in range(self.num_mask_tokens)
             ]
         )
+
+        model_type = "vit_h"
+        checkpoint_dict = {"vit_b":"pre_trained/sam_vit_b_maskdecoder.pth",
+                    "vit_l":"pre_trained/sam_vit_l_maskdecoder.pth",
+                    'vit_h':"pre_trained/sam_vit_h_maskdecoder.pth"}
+        checkpoint_path = checkpoint_dict[model_type]
+        self.load_state_dict(torch.load(checkpoint_path))
+        print("HQ Decoder init from SAM MaskDecoder")
+        for n,p in self.named_parameters():
+            p.requires_grad = False
+
+        ### Addition parameters start
+        self.hf_token = nn.Embedding(1, transformer_dim) # HQ-Ouptput-Token
+        self.hf_mlp = MLP(transformer_dim, transformer_dim, transformer_dim // 8, 3) # corresponding new MLP layer for HQ-Ouptput-Token
+        
+        self.num_hq_token = 1
+        self.additional_token = 4
+        self.total_num_mask_tokens = self.num_mask_tokens + self.num_hq_token + self.additional_token
         
         self.output_hypernetworks_additional_mlps = nn.ModuleList(
             [
