@@ -1,0 +1,11 @@
+*.bmp
+*.png
+*.jpg
+*.pth
+.vscode-server/*
+.ssh/*
+*.pyc
+.dockerfile.*
+*.gitconfig
+.cache/*
+lightning_logs/*
