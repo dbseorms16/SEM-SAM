@@ -1,12 +1,12 @@
 python finetune.py \
     --data_root ./cus_dataset \
     --model_type vit_h \
-    --checkpoint_path ./checkpoints/last-v5.ckpt \
+    --checkpoint_path ./checkpoints/last-v6.ckpt \
     --freeze_image_encoder \
     --freeze_mask_decoder \
     --freeze_prompt_encoder \
     --train_VPT_decoder \
-    --batch_size 4 \
+    --batch_size 1 \
     --image_size 1024 \
     --steps 1500000 \
     --learning_rate 1.e-5 \
