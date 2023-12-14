@@ -116,24 +116,24 @@ class MaskDecoder(nn.Module):
                                         nn.GELU(),
                                         nn.Conv2d(transformer_dim // 4, transformer_dim // 8, 3, 1, 1))
         
-        self.feature_align = nn.Linear(4096, 256) # align the patch feature dim to query patch dim.
-        self.matcher = InnerProductMatcher()
+        # self.feature_align = nn.Linear(4096, 256) # align the patch feature dim to query patch dim.
+        # self.matcher = InnerProductMatcher()
         
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))  # pooling used for the query patch feature
         
-        embed_dim = 32
+        embed_dim = 256
         mid_dim = 1024
-        head= 8
+        head = 8
         dropout = 0.0
         self.aggt = SimilarityWeightedAggregation(embed_dim=embed_dim, head=head, dropout=dropout)
-        # self.conv1 = nn.Conv2d(embed_dim, mid_dim, kernel_size=3, stride=1, padding=1)
-        # self.dropout = nn.Dropout(dropout)
-        # self.conv2 = nn.Conv2d(mid_dim, embed_dim, kernel_size=3, stride=1, padding=1)
-        # self.norm1 = nn.LayerNorm(embed_dim)
-        # self.norm2 = nn.LayerNorm(embed_dim)
-        # self.dropout1 = nn.Dropout(dropout)
-        # self.dropout2 = nn.Dropout(dropout)
-        # self.activation = nn.LeakyReLU()
+        self.conv1 = nn.Conv2d(embed_dim, mid_dim, kernel_size=3, stride=1, padding=1)
+        self.dropout = nn.Dropout(dropout)
+        self.conv2 = nn.Conv2d(mid_dim, embed_dim, kernel_size=3, stride=1, padding=1)
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+        self.activation = nn.LeakyReLU()
         
         # safecount_block = SAFECountBlock(
         #     embed_dim=embed_dim,
@@ -238,27 +238,21 @@ class MaskDecoder(nn.Module):
                                 torch.fliplr(prompt_img_feature),
                                 torch.flipud(prompt_img_feature),
                                 torch.rot90(prompt_img_feature, 1, [2,3])] 
+        tgt = image_embeddings
+        tgt2 = self.aggt(query=image_embeddings, keys=augmented_prompt_imgs, values=augmented_prompt_imgs).contiguous()
+        tgt = tgt + self.dropout1(tgt2)
+        tgt = tgt.permute(0, 2, 3, 1).contiguous()
+        tgt = self.norm1(tgt).permute(0, 3, 1, 2).contiguous()
+        tgt2 = self.conv2(self.dropout(self.activation(self.conv1(tgt))))
+        tgt = tgt + self.dropout2(tgt2)
+        tgt = tgt.permute(0, 2, 3, 1).contiguous()
+        tgt = self.norm2(tgt).permute(0, 3, 1, 2).contiguous() 
+        image_embeddings = tgt
         
-                            
-                            
         hq_tokens = []
         for prompt_img_feature in augmented_prompt_imgs:
-            # tmp_patch = self.avgpool(prompt_img_feature)
-            # torch.Size([1, 256, 64, 64]) torch.Size([1, 256, 1, 1])
-            # print(image_embeddings.shape, tmp_patch.shape)
-            tgt2 = self.aggt(query=image_embeddings, keys=prompt_img_feature, values=prompt_img_feature).contiguous()
-            print(tgt2.shape)
-            # simliarty = nn.ConvTranspose2d(256, 256, kernel_size=1, stride=2)
-            # simliarty.weight.data = tmp_patch
-            # embeddings = Variable(image_embeddings) 
-            # corr_map = simliarty(embeddings)            
-            
-            # print(corr_map.shape, simliarty.weight.data.shape)
-
-            # corr_map = self.matcher(image_embeddings, tmp_patch)
-            # corr_map = corr_map.squeeze(-1)
-            # hq_token = self.feature_align(corr_map)
-            hq_tokens.append(tgt2)
+            tmp_patch = self.avgpool(prompt_img_feature).flatten(1)
+            hq_tokens.append(tmp_patch)
         hq_tokens = torch.cat(hq_tokens, dim=0) 
         
         output_tokens = torch.cat([self.iou_token.weight, self.mask_tokens.weight, self.hf_token.weight, hq_tokens], dim=0)
@@ -468,6 +462,11 @@ class SimilarityWeightedAggregation(nn.Module):
 
     def __init__(self, embed_dim, head, dropout):
         super().__init__()
+        # assert pool_size[0] % 2 == 1 and pool_size[1] % 2 == 1
+        # assert pool_type in ["max", "avg"]
+        self.pool_type = 'max'
+        self.pool_size = [3, 3]
+        
         self.embed_dim = embed_dim
         self.head = head
         self.dropout = nn.Dropout(dropout)
@@ -480,12 +479,12 @@ class SimilarityWeightedAggregation(nn.Module):
     def forward(self, query, keys, values):
         """
         query: 1 x C x H x W
-        keys: MN x C x H x W
-        values: MN x C x H x W
+        keys: list of 1 x C x H x W
+        values: list of 1 x C x H x W
         """
-        _, _, h_p, w_p = keys.shape
+        h_p, w_p = self.pool_size
         pad = (w_p // 2, w_p // 2, h_p // 2, h_p // 2)
-        _, _, h_q, w_q = query.shape
+        _, _, h_q, w_q = query.size()
 
         ##################################################################################
         # calculate similarity (attention)
@@ -498,7 +497,10 @@ class SimilarityWeightedAggregation(nn.Module):
         )  # [head,c,h,w]
         attns_list = []
         for key in keys:
-            key = key.unsqueeze(0)
+            if self.pool_type == "max":
+                key = F.adaptive_max_pool2d(key, self.pool_size, return_indices=False)
+            else:
+                key = F.adaptive_avg_pool2d(key, self.pool_size)
             key = self.in_conv(key)
             key = key.permute(0, 2, 3, 1).contiguous()
             key = self.norm(key).permute(0, 3, 1, 2).contiguous()
@@ -512,7 +514,7 @@ class SimilarityWeightedAggregation(nn.Module):
             attn = torch.cat(attn_list, dim=0)  # [head,1,h,w]
             attns_list.append(attn)
         attns = torch.cat(attns_list, dim=1)  # [head,n,h,w]
-        assert list(attns.size()) == [self.head, keys.shape[0], h_q, w_q]
+        assert list(attns.size()) == [self.head, len(keys), h_q, w_q]
 
         ##################################################################################
         # score normalization
@@ -530,8 +532,13 @@ class SimilarityWeightedAggregation(nn.Module):
         ##################################################################################
         feats = 0
         for idx, value in enumerate(values):
+            if self.pool_type == "max":
+                value = F.adaptive_max_pool2d(
+                    value, self.pool_size, return_indices=False
+                )
+            else:
+                value = F.adaptive_avg_pool2d(value, self.pool_size)
             attn = attns[:, idx, :, :].unsqueeze(1)  # [head,1,h,w]
-            value = value.unsqueeze(0)
             value = self.in_conv(value)
             value = value.contiguous().view(
                 self.head, self.head_dim, h_p, w_p
