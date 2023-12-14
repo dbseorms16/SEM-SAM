@@ -54,10 +54,14 @@ class Custom_Dataset(Dataset):
             # coord_x, coord_y = random.randint(0, original_width - self.prompt_w), random.randint(0, original_height - self.prompt_w)
         
         ## define coordinates
-        x, y = coord_x, coord_y
+        x, y = int(coord_x * ratio_w), int(coord_y * ratio_h)
         
         # normalized_bbox = [int(x * ratio_w), int(y * ratio_h) , int((x + prompt_w) * ratio_w), int((y + prompt_h) * ratio_h)]
-        normalized_bbox = [int(x * ratio_w), int(y * ratio_h) , int((x + prompt_w) * ratio_w), int((y + prompt_h) * ratio_h)]
+        normalized_bbox = [x, y , x + prompt_w, y + prompt_h]
+        ## embedding dim
+        # normalized_box = np.divide(normalized_bbox, 1024 // 64)
+        # x1, y1, x2, y2 = np.around(normalized_box)
+        
         # normalized_bbox = [0, 0 , w, w]
         
         masks = []
@@ -82,7 +86,6 @@ class Custom_Dataset(Dataset):
         
         f_name = file_name.split('\\')
         f_name = f_name[2] + '_' + f_name[-1].split('.')[0]
-        
         
         return image, torch.tensor(entire_bboxes), torch.tensor(masks).long(), prompt_boxes, f_name, gt_class
     
